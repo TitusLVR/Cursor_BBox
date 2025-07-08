@@ -1,0 +1,250 @@
+import bpy
+from .utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge
+from .functions import cursor_aligned_bounding_box, enable_edge_highlight, disable_edge_highlight, enable_bbox_preview, disable_bbox_preview
+
+class VIEW3D_OT_cursor_place_raycast(bpy.types.Operator):
+    """Place cursor with raycast on mouse click with edge selection"""
+    bl_idname = "view3d.cursor_place_raycast"
+    bl_label = "Place Cursor with Raycast"
+    bl_description = "Click to place cursor at surface position with face and edge alignment"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    align_to_face: bpy.props.BoolProperty(
+        name="Align to Face",
+        description="Align cursor rotation to face normal",
+        default=True
+    )
+    
+    current_edge_index: bpy.props.IntProperty(default=0)
+    current_face_data = None
+    
+    def modal(self, context, event):
+        # Update status bar with modal controls
+        context.area.header_text_set("LMB: Place Cursor | Scroll: Select Edge | RMB/ESC: Cancel")
+        
+        # Allow navigation events to pass through
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
+            return {'PASS_THROUGH'}
+        if event.type == 'MIDDLEMOUSE':
+            return {'PASS_THROUGH'}
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and (event.ctrl or event.shift):
+            return {'PASS_THROUGH'}
+        
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            result = place_cursor_with_raycast_and_edge(
+                context, event, self.align_to_face, self.current_edge_index
+            )
+            
+            if result['success']:
+                self.report({'INFO'}, f"Cursor placed on {result['object'].name}")
+            else:
+                self.report({'WARNING'}, "No surface hit")
+            
+            disable_edge_highlight()
+            disable_bbox_preview()
+            context.area.header_text_set(None)  # Clear status bar
+            return {'FINISHED'}
+        
+        elif event.type == 'WHEELUPMOUSE' and not event.shift and not event.ctrl:
+            # Get face data first
+            face_data = get_face_edges_from_raycast(context, event)
+            if face_data:
+                self.current_face_data = face_data
+                self.current_edge_index = select_edge_by_scroll(
+                    face_data, 1, self.current_edge_index
+                )
+                # Update cursor and highlight
+                result = place_cursor_with_raycast_and_edge(
+                    context, event, self.align_to_face, self.current_edge_index
+                )
+                if result['success']:
+                    context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'WHEELDOWNMOUSE' and not event.shift and not event.ctrl:
+            # Get face data first
+            face_data = get_face_edges_from_raycast(context, event)
+            if face_data:
+                self.current_face_data = face_data
+                self.current_edge_index = select_edge_by_scroll(
+                    face_data, -1, self.current_edge_index
+                )
+                # Update cursor and highlight
+                result = place_cursor_with_raycast_and_edge(
+                    context, event, self.align_to_face, self.current_edge_index
+                )
+                if result['success']:
+                    context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'MOUSEMOVE':
+            # Update preview as mouse moves
+            result = place_cursor_with_raycast_and_edge(
+                context, event, self.align_to_face, self.current_edge_index
+            )
+            if result['success']:
+                self.current_face_data = result['face_data']
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type in {'ESC', 'RIGHTMOUSE'}:
+            disable_edge_highlight()
+            disable_bbox_preview()
+            context.area.header_text_set(None)  # Clear status bar
+            return {'CANCELLED'}
+        
+        return {'RUNNING_MODAL'}
+    
+    def invoke(self, context, event):
+        if context.area.type == 'VIEW_3D':
+            self.current_edge_index = 0
+            self.current_face_data = None
+            enable_edge_highlight()
+            enable_bbox_preview()
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        else:
+            self.report({'WARNING'}, "Active space must be a View3D")
+            return {'CANCELLED'}
+
+class VIEW3D_OT_cursor_place_and_bbox(bpy.types.Operator):
+    """Place cursor and create bounding box in one action with edge selection"""
+    bl_idname = "view3d.cursor_place_and_bbox"
+    bl_label = "Place Cursor and Create BBox"
+    bl_description = "Click to place cursor with edge alignment and automatically create cursor-aligned bounding box"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    push_value: bpy.props.FloatProperty(
+        name="Push Value",
+        description="How much to push bounding box faces outward",
+        default=0.01,
+        min=-1.0,
+        max=1.0,
+        precision=3
+    )
+    
+    align_to_face: bpy.props.BoolProperty(
+        name="Align to Face",
+        description="Align cursor rotation to face normal",
+        default=True
+    )
+    
+    current_edge_index: bpy.props.IntProperty(default=0)
+    current_face_data = None
+    
+    def modal(self, context, event):
+        # Update status bar with modal controls
+        context.area.header_text_set("LMB: Place Cursor & Create BBox | Scroll: Select Edge | C: Create BBox | RMB/ESC: Cancel")
+        
+        # Allow navigation events to pass through
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
+            return {'PASS_THROUGH'}
+        if event.type == 'MIDDLEMOUSE':
+            return {'PASS_THROUGH'}
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and (event.ctrl or event.shift):
+            return {'PASS_THROUGH'}
+        
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            result = place_cursor_with_raycast_and_edge(
+                context, event, self.align_to_face, self.current_edge_index
+            )
+            
+            if result['success']:
+                cursor_aligned_bounding_box(self.push_value, result['object'])
+                self.report({'INFO'}, f"Cursor placed on {result['object'].name} and bounding box created")
+            else:
+                self.report({'WARNING'}, "No surface hit")
+            
+            return {'RUNNING_MODAL'}  # Continue modal instead of finishing
+        
+        elif event.type == 'C' and event.value == 'PRESS':
+            # Create bounding box with current cursor settings
+            result = place_cursor_with_raycast_and_edge(
+                context, event, self.align_to_face, self.current_edge_index
+            )
+            
+            if result['success']:
+                cursor_aligned_bounding_box(self.push_value, result['object'])
+                self.report({'INFO'}, f"Bounding box created for {result['object'].name}")
+            else:
+                self.report({'WARNING'}, "No surface hit")
+            
+            return {'RUNNING_MODAL'}  # Continue modal
+        
+        elif event.type == 'WHEELUPMOUSE' and not event.shift and not event.ctrl:
+            face_data = get_face_edges_from_raycast(context, event)
+            if face_data:
+                self.current_face_data = face_data
+                self.current_edge_index = select_edge_by_scroll(
+                    face_data, 1, self.current_edge_index
+                )
+                result = place_cursor_with_raycast_and_edge(
+                    context, event, self.align_to_face, self.current_edge_index
+                )
+                if result['success']:
+                    context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'WHEELDOWNMOUSE' and not event.shift and not event.ctrl:
+            face_data = get_face_edges_from_raycast(context, event)
+            if face_data:
+                self.current_face_data = face_data
+                self.current_edge_index = select_edge_by_scroll(
+                    face_data, -1, self.current_edge_index
+                )
+                result = place_cursor_with_raycast_and_edge(
+                    context, event, self.align_to_face, self.current_edge_index
+                )
+                if result['success']:
+                    context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'MOUSEMOVE':
+            result = place_cursor_with_raycast_and_edge(
+                context, event, self.align_to_face, self.current_edge_index
+            )
+            if result['success']:
+                self.current_face_data = result['face_data']
+                context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type in {'ESC', 'RIGHTMOUSE'}:
+            disable_edge_highlight()
+            disable_bbox_preview()
+            context.area.header_text_set(None)  # Clear status bar
+            return {'CANCELLED'}
+        
+        return {'RUNNING_MODAL'}
+    
+    def invoke(self, context, event):
+        if context.area.type == 'VIEW_3D':
+            self.current_edge_index = 0
+            self.current_face_data = None
+            enable_edge_highlight()
+            enable_bbox_preview()
+            context.window_manager.modal_handler_add(self)
+            return {'RUNNING_MODAL'}
+        else:
+            self.report({'WARNING'}, "Active space must be a View3D")
+            return {'CANCELLED'}
+
+class VIEW3D_OT_create_cursor_bbox(bpy.types.Operator):
+    """Create cursor-aligned bounding box"""
+    bl_idname = "view3d.create_cursor_bbox"
+    bl_label = "Create Cursor-Aligned BBox"
+    bl_description = "Create bounding box aligned to current cursor position and rotation"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    push_value: bpy.props.FloatProperty(
+        name="Push Value",
+        description="How much to push bounding box faces outward",
+        default=0.01,
+        min=-1.0,
+        max=1.0,
+        precision=3
+    )
+    
+    def execute(self, context):
+        cursor_aligned_bounding_box(self.push_value)
+        self.report({'INFO'}, "Cursor-aligned bounding box created")
+        return {'FINISHED'}
