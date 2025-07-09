@@ -40,6 +40,24 @@ class CursorBBoxPreferences(AddonPreferences):
         max=10.0
     )
     
+    # Face marking settings
+    face_marking_color: FloatVectorProperty(
+        name="Face Marking Color",
+        description="Color for marked faces",
+        subtype='COLOR',
+        default=(1.0, 0.0, 0.0),
+        min=0.0,
+        max=1.0
+    )
+    
+    face_marking_alpha: FloatProperty(
+        name="Face Marking Alpha",
+        description="Transparency for marked faces",
+        default=0.3,
+        min=0.0,
+        max=1.0
+    )
+    
     # Bounding box settings
     bbox_show_wire: BoolProperty(
         name="Show Wireframe",
@@ -91,48 +109,10 @@ class CursorBBoxPreferences(AddonPreferences):
         default=True
     )
     
-    # Keyboard shortcuts
-    enable_shortcuts: BoolProperty(
-        name="Enable Keyboard Shortcuts",
-        description="Enable addon keyboard shortcuts",
-        default=True
-    )
-    
-    cursor_place_key: StringProperty(
-        name="Place Cursor Key",
-        description="Key for placing cursor (with Ctrl+Shift)",
-        default="C",
-        maxlen=1
-    )
-    
-    cursor_place_bbox_key: StringProperty(
-        name="Place Cursor & BBox Key", 
-        description="Key for placing cursor and creating bbox (with Ctrl+Shift+Alt)",
-        default="B",
-        maxlen=1
-    )
-    
-    use_ctrl: BoolProperty(
-        name="Use Ctrl",
-        description="Require Ctrl key for shortcuts",
-        default=True
-    )
-    
-    use_shift: BoolProperty(
-        name="Use Shift", 
-        description="Require Shift key for shortcuts",
-        default=True
-    )
-    
-    use_alt_for_bbox: BoolProperty(
-        name="Use Alt for BBox",
-        description="Require Alt key for place & create bbox shortcut",
-        default=True
-    )
-    
     def draw(self, context):
         layout = self.layout
         
+        # Default settings
         box = layout.box()
         box.label(text="Default Settings:", icon='SETTINGS')
         
@@ -166,6 +146,7 @@ class CursorBBoxPreferences(AddonPreferences):
         
         layout.separator()
         
+        # Visual settings
         box = layout.box()
         box.label(text="Visual Settings:", icon='COLOR')
         
@@ -177,6 +158,19 @@ class CursorBBoxPreferences(AddonPreferences):
         
         layout.separator()
         
+        # Face marking settings
+        box = layout.box()
+        box.label(text="Face Marking:", icon='FACE_MAPS')
+        
+        row = box.row()
+        row.prop(self, "face_marking_color")
+        
+        row = box.row()
+        row.prop(self, "face_marking_alpha")
+        
+        layout.separator()
+        
+        # Bounding box display
         box = layout.box()
         box.label(text="Bounding Box Display:", icon='CUBE')
         
@@ -188,64 +182,20 @@ class CursorBBoxPreferences(AddonPreferences):
         
         layout.separator()
         
-        # Keyboard shortcuts section
+        # Keymap shortcuts
         box = layout.box()
-        box.label(text="Keyboard Shortcuts:", icon='KEYINGSET')
-        
-        row = box.row()
-        row.prop(self, "enable_shortcuts")
-        
-        if self.enable_shortcuts:
-            # Modifier keys
-            sub_box = box.box()
-            sub_box.label(text="Modifier Keys:")
-            row = sub_box.row()
-            row.prop(self, "use_ctrl", text="Ctrl")
-            row.prop(self, "use_shift", text="Shift")
-            row.prop(self, "use_alt_for_bbox", text="Alt (for BBox)")
-            
-            # Key assignments
-            sub_box = box.box()
-            sub_box.label(text="Key Assignments:")
-            
-            row = sub_box.row()
-            row.prop(self, "cursor_place_key")
-            
-            # Show the actual shortcut combination
-            modifiers = []
-            if self.use_ctrl:
-                modifiers.append("Ctrl")
-            if self.use_shift:
-                modifiers.append("Shift")
-            shortcut_text = "+".join(modifiers + [self.cursor_place_key.upper()])
-            row.label(text=f"= {shortcut_text}", icon='BLANK1')
-            
-            row = sub_box.row()
-            row.prop(self, "cursor_place_bbox_key")
-            
-            # Show the actual shortcut combination for bbox
-            bbox_modifiers = modifiers.copy()
-            if self.use_alt_for_bbox:
-                bbox_modifiers.append("Alt")
-            bbox_shortcut_text = "+".join(bbox_modifiers + [self.cursor_place_bbox_key.upper()])
-            row.label(text=f"= {bbox_shortcut_text}", icon='BLANK1')
-            
-            # Instructions
-            sub_box = box.box()
-            sub_box.label(text="Current Shortcuts:", icon='INFO')
-            col = sub_box.column(align=True)
-            col.label(text=f"• {shortcut_text}: Place Cursor with Raycast")
-            col.label(text=f"• {bbox_shortcut_text}: Place Cursor & Create BBox")
-            
-            # Warning about restart
-            if context.preferences.view.show_developer_ui:
-                sub_box.separator()
-                col = sub_box.column()
-                col.alert = True
-                col.label(text="Note: Restart Blender or reload addon for shortcut changes", icon='ERROR')
-        
+        box.label(text="Keyboard Shortcuts:", icon='KEY_HLT')
+        kc = bpy.context.window_manager.keyconfigs.addon
+        col = box.column()
+        if kc:
+            import sys
+            import rna_keymap_ui
+            addon_main = sys.modules[__package__]
+            for km, kmi in getattr(addon_main, "addon_keymaps", []):
+                col.context_pointer_set("keymap", km)
+                rna_keymap_ui.draw_kmi([], kc, km, kmi, col, 0)
         else:
-            box.label(text="Keyboard shortcuts are disabled", icon='X')
+            col.label(text="Keyconfig not found", icon='ERROR')
 
 def get_preferences():
     """Get addon preferences"""

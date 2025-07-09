@@ -35,10 +35,15 @@ class VIEW3D_PT_cursor_bbox_panel(bpy.types.Panel):
         layout.separator()
         
         box = layout.box()
-        box.label(text="Combined Action:", icon='TOOL_SETTINGS')
+        box.label(text="Combined Actions:", icon='TOOL_SETTINGS')
         
         row = box.row()
         op = row.operator("view3d.cursor_place_and_bbox", text="Place & Create BBox", icon='CURSOR')
+        op.push_value = scene.cursor_bbox_push
+        op.align_to_face = scene.cursor_bbox_align_face
+        
+        row = box.row()
+        op = row.operator("view3d.cursor_place_and_bbox_marking", text="Place & Create with Face Marking", icon='FACE_MAPS')
         op.push_value = scene.cursor_bbox_push
         op.align_to_face = scene.cursor_bbox_align_face
         
@@ -49,13 +54,22 @@ class VIEW3D_PT_cursor_bbox_panel(bpy.types.Panel):
         box.label(text="Instructions:", icon='INFO')
         col = box.column(align=True)
         col.label(text="• Select faces (Edit) or objects")
-        col.label(text="• Click 'Place Cursor' then hover over face")
+        col.label(text="• Click tool button then hover over surface")
         col.label(text="• Yellow preview shows bounding box")
         col.label(text="• Mouse wheel: select edge (no modifiers)")
         col.label(text="• Green highlight shows selected edge")
+        
+        col.separator()
+        col.label(text="Face Marking Mode:", icon='FACE_MAPS')
+        col.label(text="• F: Mark/unmark face under cursor")
+        col.label(text="• Z: Clear all marked faces")
+        col.label(text="• Red overlay shows marked faces")
+        col.label(text="• LMB: Create BBox from marked faces")
+        
+        col.separator()
+        col.label(text="Navigation:", icon='VIEW3D')
         col.label(text="• Middle mouse: orbit/pan")
         col.label(text="• Shift+Wheel or Ctrl+Wheel: zoom/pan")
-        col.label(text="• C to create BBox without placing cursor")
         col.label(text="• RMB or ESC to cancel")
         
         layout.separator()
