@@ -253,12 +253,28 @@ def unmark_face(obj, face_index):
     """Remove a face from marked faces - requires rebuilding the face list"""
     global marked_faces_data
     
-    # For simplicity, we'll need to rebuild the entire face list for this object
-    # In a production addon, you'd want to store face indices and rebuild more efficiently
+    # Simply remove this object's visual data - it will be rebuilt by mark_face calls
+    # for the remaining marked faces
+    if obj.name in marked_faces_data:
+        del marked_faces_data[obj.name]
+
+def rebuild_marked_faces_visual_data(obj, face_indices):
+    """Rebuild visual data for an object's marked faces"""
+    global marked_faces_data
     
-    # This is a simplified version - in practice you'd want to store face indices
-    # and rebuild the vertex list when needed
-    pass
+    if not face_indices:
+        # No faces to mark, remove visual data
+        if obj.name in marked_faces_data:
+            del marked_faces_data[obj.name]
+        return
+    
+    # Clear existing visual data for this object
+    if obj.name in marked_faces_data:
+        del marked_faces_data[obj.name]
+    
+    # Rebuild visual data for all marked faces
+    for face_idx in face_indices:
+        mark_face(obj, face_idx)
 
 def clear_marked_faces():
     """Clear all marked faces"""

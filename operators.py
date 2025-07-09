@@ -13,7 +13,8 @@ from .functions import (
     mark_face,
     unmark_face,
     clear_marked_faces,
-    update_marked_faces_bbox
+    update_marked_faces_bbox,
+    rebuild_marked_faces_visual_data
 )
 
 class VIEW3D_OT_cursor_place_raycast(bpy.types.Operator):
@@ -208,9 +209,13 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
                 # Toggle face marking
                 if face_idx in self.marked_faces[obj]:
                     self.marked_faces[obj].remove(face_idx)
-                    unmark_face(obj, face_idx)
                     if not self.marked_faces[obj]:
                         del self.marked_faces[obj]
+                        # Clear visual data for this object
+                        unmark_face(obj, face_idx)
+                    else:
+                        # Rebuild visual data for remaining marked faces
+                        rebuild_marked_faces_visual_data(obj, self.marked_faces[obj])
                     self.report({'INFO'}, f"Unmarked face {face_idx} on {obj.name}")
                 else:
                     self.marked_faces[obj].add(face_idx)
@@ -227,27 +232,19 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
             return {'RUNNING_MODAL'}
         
         elif event.type == 'A' and event.value == 'PRESS':
-            # Place cursor first, then add point marker at that location
-            result = place_cursor_with_raycast_and_edge(
-                context, event, self.align_to_face, self.current_edge_index, preview=False
-            )
+            # Add point marker at current cursor location
+            cursor_location = context.scene.cursor.location.copy()
+            self.marked_points.append(cursor_location)
+            self.report({'INFO'}, f"Added point marker at cursor location ({len(self.marked_points)} total points)")
             
-            if result['success']:
-                # Add point marker at current cursor location
-                cursor_location = context.scene.cursor.location.copy()
-                self.marked_points.append(cursor_location)
-                self.report({'INFO'}, f"Added point marker at cursor location ({len(self.marked_points)} total points)")
-                
-                # Update bbox preview to include the new point
-                if self.marked_faces or self.marked_points:
-                    # Update preview with marked faces and points
-                    update_marked_faces_bbox(self.marked_faces, self.push_value, 
-                                           context.scene.cursor.location, 
-                                           context.scene.cursor.rotation_euler,
-                                           marked_points=self.marked_points)
-                context.area.tag_redraw()
-            else:
-                self.report({'WARNING'}, "No surface hit - cannot add point")
+            # Update bbox preview to include the new point
+            if self.marked_faces or self.marked_points:
+                # Update preview with marked faces and points
+                update_marked_faces_bbox(self.marked_faces, self.push_value, 
+                                       context.scene.cursor.location, 
+                                       context.scene.cursor.rotation_euler,
+                                       marked_points=self.marked_points)
+            context.area.tag_redraw()
             
             return {'RUNNING_MODAL'}
         
@@ -258,7 +255,7 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
                 self.marked_faces.clear()
                 self.marked_points.clear()
                 self.report({'INFO'}, "Cleared all marked faces and points")
-                # Update bbox preview to show object under cursor
+                # Reset to regular object bbox preview
                 result = place_cursor_with_raycast_and_edge(
                     context, event, self.align_to_face, self.current_edge_index
                 )
@@ -277,6 +274,12 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
                     context, event, self.align_to_face, self.current_edge_index
                 )
                 if result['success']:
+                    # Update preview with marked faces and points if any
+                    if self.marked_faces or self.marked_points:
+                        update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                               context.scene.cursor.location,
+                                               context.scene.cursor.rotation_euler,
+                                               marked_points=self.marked_points)
                     context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
@@ -291,6 +294,12 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
                     context, event, self.align_to_face, self.current_edge_index
                 )
                 if result['success']:
+                    # Update preview with marked faces and points if any
+                    if self.marked_faces or self.marked_points:
+                        update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                               context.scene.cursor.location,
+                                               context.scene.cursor.rotation_euler,
+                                               marked_points=self.marked_points)
                     context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
@@ -300,10 +309,11 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
             )
             if result['success']:
                 self.current_face_data = result['face_data']
-                # Update bbox preview - if we have marked items, show their bbox
+                # Update bbox preview - show marked faces and points bbox if any, otherwise object bbox
                 if self.marked_faces or self.marked_points:
-                    update_marked_faces_bbox(self.marked_faces, self.push_value, 
-                                           context.scene.cursor.location, 
+                    # Update preview with marked faces and points
+                    update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                           context.scene.cursor.location,
                                            context.scene.cursor.rotation_euler,
                                            marked_points=self.marked_points)
                 context.area.tag_redraw()
