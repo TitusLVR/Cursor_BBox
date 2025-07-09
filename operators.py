@@ -1,7 +1,7 @@
 import bpy
 import bmesh
 from mathutils import Vector
-from .utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge
+from .utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element
 from .functions import (
     cursor_aligned_bounding_box, 
     enable_edge_highlight, 
@@ -35,7 +35,7 @@ class VIEW3D_OT_cursor_place_raycast(bpy.types.Operator):
     
     def modal(self, context, event):
         # Update status bar with modal controls
-        context.area.header_text_set("LMB: Place Cursor | Scroll: Select Edge | RMB/ESC: Cancel")
+        context.area.header_text_set("LMB: Place Cursor | Scroll: Select Edge | S: Snap to Face Element | RMB/ESC: Cancel")
         
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
@@ -92,6 +92,20 @@ class VIEW3D_OT_cursor_place_raycast(bpy.types.Operator):
             if result['success']:
                 self.current_face_data = result['face_data']
                 context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'S' and event.value == 'PRESS':
+            # Snap cursor to closest vertex, edge midpoint, or face center from current face
+            face_data = get_face_edges_from_raycast(context, event)
+            result = snap_cursor_to_closest_element(context, event, face_data)
+            if result['success']:
+                if face_data:
+                    self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
+                else:
+                    self.report({'INFO'}, f"Cursor snapped to {result['type']} ({result['distance']:.1f}px away)")
+                context.area.tag_redraw()
+            else:
+                self.report({'WARNING'}, "No suitable snap target found")
             return {'RUNNING_MODAL'}
         
         elif event.type in {'ESC', 'RIGHTMOUSE'}:
@@ -157,7 +171,7 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
         
         context.area.header_text_set(
             f"LMB: Create BBox{marking_status} | Scroll: Select Edge | "
-            f"F: Mark/Unmark Face | A: Add Point | Z: Clear All | RMB/ESC: Cancel"
+            f"F: Mark/Unmark Face | A: Add Point | S: Snap to Face Element | Z: Clear All | RMB/ESC: Cancel"
         )
         
         # Allow navigation events to pass through
@@ -319,6 +333,26 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
+        elif event.type == 'S' and event.value == 'PRESS':
+            # Snap cursor to closest vertex, edge midpoint, or face center from current face
+            face_data = get_face_edges_from_raycast(context, event)
+            result = snap_cursor_to_closest_element(context, event, face_data)
+            if result['success']:
+                if face_data:
+                    self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
+                else:
+                    self.report({'INFO'}, f"Cursor snapped to {result['type']} ({result['distance']:.1f}px away)")
+                # Update bbox preview after cursor snap
+                if self.marked_faces or self.marked_points:
+                    update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                           context.scene.cursor.location,
+                                           context.scene.cursor.rotation_euler,
+                                           marked_points=self.marked_points)
+                context.area.tag_redraw()
+            else:
+                self.report({'WARNING'}, "No suitable snap target found")
+            return {'RUNNING_MODAL'}
+        
         elif event.type in {'ESC', 'RIGHTMOUSE'}:
             disable_edge_highlight()
             disable_bbox_preview()
@@ -372,7 +406,7 @@ class VIEW3D_OT_cursor_place_and_bbox(bpy.types.Operator):
     
     def modal(self, context, event):
         # Update status bar with modal controls
-        context.area.header_text_set("LMB: Place Cursor & Create BBox | Scroll: Select Edge | C: Create BBox | RMB/ESC: Cancel")
+        context.area.header_text_set("LMB: Place Cursor & Create BBox | Scroll: Select Edge | S: Snap to Face Element | C: Create BBox | RMB/ESC: Cancel")
         
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
@@ -435,6 +469,21 @@ class VIEW3D_OT_cursor_place_and_bbox(bpy.types.Operator):
                 self.current_face_data = result['face_data']
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
+        
+        elif event.type == 'S' and event.value == 'PRESS':
+            # Snap cursor to closest vertex, edge midpoint, or face center from current face
+            face_data = get_face_edges_from_raycast(context, event)
+            result = snap_cursor_to_closest_element(context, event, face_data)
+            if result['success']:
+                if face_data:
+                    self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
+                else:
+                    self.report({'INFO'}, f"Cursor snapped to {result['type']} ({result['distance']:.1f}px away)")
+                context.area.tag_redraw()
+            else:
+                self.report({'WARNING'}, "No suitable snap target found")
+            return {'RUNNING_MODAL'}
+        
         elif event.type in {'ESC', 'RIGHTMOUSE'}:
             disable_edge_highlight()
             disable_bbox_preview()
