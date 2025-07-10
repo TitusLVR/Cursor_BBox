@@ -22,12 +22,12 @@ class CursorBBoxPreferences(AddonPreferences):
         default=True
     )
     
-    # Edge highlight settings
+    # Edge highlight settings - Updated to #46FFB4
     edge_highlight_color: FloatVectorProperty(
         name="Edge Highlight Color",
         description="Color for highlighted edges",
         subtype='COLOR',
-        default=(0.0, 1.0, 0.0),
+        default=(0.275, 1.0, 0.706),  # #46FFB4 converted to RGB
         min=0.0,
         max=1.0
     )
@@ -40,12 +40,12 @@ class CursorBBoxPreferences(AddonPreferences):
         max=10.0
     )
     
-    # Face marking settings
+    # Face marking settings - Updated to #51AAFB
     face_marking_color: FloatVectorProperty(
         name="Face Marking Color",
         description="Color for marked faces",
         subtype='COLOR',
-        default=(1.0, 0.0, 0.0),
+        default=(0.318, 0.667, 0.984),  # #51AAFB converted to RGB
         min=0.0,
         max=1.0
     )
@@ -56,6 +56,33 @@ class CursorBBoxPreferences(AddonPreferences):
         default=0.3,
         min=0.0,
         max=1.0
+    )
+    
+    # Point marking settings - Using same color as edge highlight #46FFB4
+    point_marking_color: FloatVectorProperty(
+        name="Point Marking Color",
+        description="Color for marked points",
+        subtype='COLOR',
+        default=(0.275, 1.0, 0.706),  # #46FFB4 converted to RGB
+        min=0.0,
+        max=1.0
+    )
+    
+    point_marking_alpha: FloatProperty(
+        name="Point Marking Alpha",
+        description="Transparency for marked points",
+        default=0.9,
+        min=0.0,
+        max=1.0
+    )
+    
+    point_marking_size: FloatProperty(
+        name="Point Marking Size",
+        description="Size of point markers in Blender units",
+        default=0.1,
+        min=0.01,
+        max=1.0,
+        precision=3
     )
     
     # Bounding box settings
@@ -71,7 +98,7 @@ class CursorBBoxPreferences(AddonPreferences):
         default=True
     )
     
-    # BBox preview settings
+    # BBox preview settings - Updated to #FFFFFF
     bbox_preview_enabled: BoolProperty(
         name="Show BBox Preview",
         description="Show bounding box preview while placing cursor",
@@ -82,7 +109,7 @@ class CursorBBoxPreferences(AddonPreferences):
         name="BBox Preview Color",
         description="Color for bounding box preview",
         subtype='COLOR',
-        default=(1.0, 1.0, 0.0),  # Yellow
+        default=(1.0, 1.0, 1.0),  # #FFFFFF converted to RGB
         min=0.0,
         max=1.0
     )
@@ -170,6 +197,21 @@ class CursorBBoxPreferences(AddonPreferences):
         
         layout.separator()
         
+        # Point marking settings
+        box = layout.box()
+        box.label(text="Point Marking:", icon='EMPTY_AXIS')
+        
+        row = box.row()
+        row.prop(self, "point_marking_color")
+        
+        row = box.row()
+        row.prop(self, "point_marking_alpha")
+        
+        row = box.row()
+        row.prop(self, "point_marking_size")
+        
+        layout.separator()
+        
         # Bounding box display
         box = layout.box()
         box.label(text="Bounding Box Display:", icon='CUBE')
@@ -179,6 +221,17 @@ class CursorBBoxPreferences(AddonPreferences):
         
         row = box.row()
         row.prop(self, "bbox_show_all_edges")
+        
+        layout.separator()
+        
+        # Color reference
+        box = layout.box()
+        box.label(text="Color Reference:", icon='INFO')
+        col = box.column(align=True)
+        col.label(text="• BBox Preview: White (#FFFFFF)")
+        col.label(text="• Edge Highlight: Mint Green (#46FFB4)")  
+        col.label(text="• Selected Faces: Light Blue (#51AAFB)")
+        col.label(text="• Point Markers: Mint Green (#46FFB4)")
         
         layout.separator()
         

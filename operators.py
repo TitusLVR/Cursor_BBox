@@ -4,17 +4,20 @@ from mathutils import Vector
 from .utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element
 from .functions import (
     cursor_aligned_bounding_box, 
-    enable_edge_highlight, 
-    disable_edge_highlight, 
-    enable_bbox_preview, 
-    disable_bbox_preview,
-    enable_face_marking,
-    disable_face_marking,
+    enable_edge_highlight_wrapper as enable_edge_highlight,
+    disable_edge_highlight_wrapper as disable_edge_highlight,
+    enable_bbox_preview_wrapper as enable_bbox_preview,
+    disable_bbox_preview_wrapper as disable_bbox_preview,
+    enable_face_marking_wrapper as enable_face_marking,
+    disable_face_marking_wrapper as disable_face_marking,
     mark_face,
     unmark_face,
     clear_marked_faces,
     update_marked_faces_bbox,
-    rebuild_marked_faces_visual_data
+    rebuild_marked_faces_visual_data,
+    add_marked_point,
+    clear_marked_points,
+    clear_all_markings
 )
 
 class VIEW3D_OT_cursor_place_raycast(bpy.types.Operator):
@@ -249,6 +252,10 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
             # Add point marker at current cursor location
             cursor_location = context.scene.cursor.location.copy()
             self.marked_points.append(cursor_location)
+            
+            # Also call the global function to ensure handlers
+            add_marked_point(cursor_location)
+            
             self.report({'INFO'}, f"Added point marker at cursor location ({len(self.marked_points)} total points)")
             
             # Update bbox preview to include the new point
@@ -265,9 +272,9 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
         elif event.type == 'Z' and event.value == 'PRESS':
             # Clear all marked faces and points
             if self.marked_faces or self.marked_points:
-                clear_marked_faces()
-                self.marked_faces.clear()
-                self.marked_points.clear()
+                clear_all_markings()  # Clear global state
+                self.marked_faces.clear()  # Clear local state
+                self.marked_points.clear()  # Clear local state
                 self.report({'INFO'}, "Cleared all marked faces and points")
                 # Reset to regular object bbox preview
                 result = place_cursor_with_raycast_and_edge(
@@ -357,7 +364,7 @@ class VIEW3D_OT_cursor_place_and_bbox_with_marking(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
-            clear_marked_faces()
+            clear_all_markings()  # Clear global state when cancelling
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
         
