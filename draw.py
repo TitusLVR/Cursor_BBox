@@ -1,6 +1,5 @@
 import bpy
 import gpu
-import gpu_extras.batch
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 from .preferences import get_preferences

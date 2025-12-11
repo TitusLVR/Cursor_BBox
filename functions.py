@@ -567,7 +567,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                 name_parts.append("Faces")
             if marked_points:
                 name_parts.append("Points")
-            bbox_obj.name = f"CursorBBox_{'_'.join(name_parts)}" if name_parts else "CursorBBox_Marked"
+            bbox_obj.name = f"CursorBBox{'_'.join(name_parts)}" if name_parts else "CursorBBox_Marked"
             bbox_obj.scale = dimensions
             bbox_obj.show_wire = show_wire
             bbox_obj.show_all_edges = show_all_edges
