@@ -1,6 +1,6 @@
 site_name: Cursor BBox Documentation
 theme:
-  name: readthedocs
+  name: material
 
 nav:
   - Home: index.md
