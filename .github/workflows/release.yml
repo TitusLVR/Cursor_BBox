@@ -1,0 +1,108 @@
+name: Create Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '__init__.py'
+      - '**/*.py'
+      - '!docs/**'
+      - '!.github/**'
+      - '!**/__pycache__/**'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from __init__.py
+        id: version
+        run: |
+          # Extract version tuple from __init__.py using Python
+          VERSION=$(python3 << 'EOF'
+          import re
+          with open('__init__.py', 'r') as f:
+              content = f.read()
+          match = re.search(r'"version":\s*\((\d+),\s*(\d+),\s*(\d+)\)', content)
+          if match:
+              version = f"{match.group(1)}.{match.group(2)}.{match.group(3)}"
+              print(version)
+          else:
+              exit(1)
+          EOF
+          )
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag ${{ steps.version.outputs.tag }} already exists"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag ${{ steps.version.outputs.tag }} does not exist"
+          fi
+
+      - name: Create addon zip
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          # Create zip excluding unnecessary files
+          # Include README.md but exclude other markdown files in docs
+          zip -r cursor_bbox.zip . \
+            -x "*.git*" \
+            -x "*__pycache__*" \
+            -x "*.pyc" \
+            -x "*.pyo" \
+            -x "*.pyd" \
+            -x "docs/*" \
+            -x ".github/*" \
+            -x "mkdocs.yml" \
+            -x "requirements.txt" \
+            -x "site/*" \
+            -x ".vscode/*" \
+            -x ".gitignore" \
+            -x "*.temp*" \
+            -x "*.snippet*"
+          
+          echo "Created cursor_bbox.zip"
+          ls -lh cursor_bbox.zip
+
+      - name: Create Git tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          body: |
+            ## Cursor Aligned Bounding Box ${{ steps.version.outputs.tag }}
+            
+            ### Installation
+            1. Download `cursor_bbox.zip`
+            2. In Blender, go to Edit > Preferences > Add-ons
+            3. Click "Install..." and select the zip file
+            4. Enable "Cursor Aligned Bounding Box"
+            
+            ### Documentation
+            Full documentation available at: https://tituslvr.github.io/Cursor_BBox/
+          files: cursor_bbox.zip
+          draft: false
+          prerelease: false

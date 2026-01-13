@@ -1,0 +1,13 @@
+/* Dark grey header for Material theme */
+.md-header {
+  background-color: #2d2d2d !important;
+}
+
+.md-header--shadow {
+  box-shadow: 0 0 0.2rem rgba(0,0,0,.1), 0 0.2rem 0.4rem rgba(0,0,0,.2) !important;
+}
+
+/* Ensure header text is visible */
+.md-header__title {
+  color: #ffffff !important;
+}

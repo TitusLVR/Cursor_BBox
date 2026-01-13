@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Cursor Aligned Bounding Box",
     "author": "Titus",
-    "version": (1, 4, 0),  # Incremented for structure update
+    "version": (1, 0, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Cursor BBox",
     "description": "Set cursor and fit bounding shapes (Box, Hull, Sphere) with face marking.",
@@ -13,7 +13,6 @@ bl_info = {
 import bpy
 
 # Import from new structure
-from .settings import properties
 from .settings import properties
 from .settings.preferences import CursorBBoxPreferences
 from .operators.set_cursor import CursorBBox_OT_set_cursor
