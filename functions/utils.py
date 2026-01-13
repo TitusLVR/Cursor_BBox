@@ -236,7 +236,8 @@ def _process_raycast_result(hit, location, normal, face_index, obj, matrix):
     return {
         'face_index': face_index,
         'face_normal': normal,
-        'face_center': location,
+        'face_center': location, # Keep for backward compatibility, actually IS hit location
+        'hit_location': location, # Explicit name
         'edges': face_edges,
         'object': obj
     }
@@ -245,8 +246,8 @@ def _process_raycast_result(hit, location, normal, face_index, obj, matrix):
 
 def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=True, edge_index=0, preview=True):
     """Optimized cursor placement with caching"""
-    from .functions import update_edge_highlight, update_bbox_preview
-    from .preferences import get_preferences
+    from .core import update_edge_highlight, update_bbox_preview
+    from ..settings.preferences import get_preferences
     
     face_data = get_face_edges_from_raycast_optimized(context, event)
     
@@ -1057,3 +1058,68 @@ def force_enable_point_drawing():
         print("Point drawing force-enabled")
     else:
         print("No points to draw")
+
+# ===== COPLANAR SELECTION UTILITIES =====
+
+def get_connected_coplanar_faces(obj, start_face_index, angle_tolerance_radians):
+    """Find connected faces that are coplanar within tolerance"""
+    if obj.type != 'MESH':
+        return set()
+    
+    mesh = obj.data
+    if start_face_index >= len(mesh.polygons):
+        return set()
+
+    # Create BVH/BMesh for connectivity
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    
+    if start_face_index >= len(bm.faces):
+        bm.free()
+        return set()
+        
+    start_face = bm.faces[start_face_index]
+    start_normal = start_face.normal.copy()
+    
+    visited = set()
+    coplanar_indices = set()
+    queue = [start_face]
+    
+    visited.add(start_face)
+    coplanar_indices.add(start_face.index)
+    
+    while queue:
+        current_face = queue.pop(0)
+        
+        for edge in current_face.edges:
+            for neighbor in edge.link_faces:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    
+                    # Check angle - compare to start face to maintain planarity stability
+                    # 100.0 is default safe return for parallel check, though angle() handles robustly
+                    try:
+                        angle = start_normal.angle(neighbor.normal)
+                    except ValueError:
+                        angle = 0.0 # Exactly parallel or zero length normal
+                    
+                    if angle < angle_tolerance_radians:
+                        coplanar_indices.add(neighbor.index)
+                        queue.append(neighbor)
+    
+    bm.free()
+    return coplanar_indices
+
+def ensure_cbb_collection(context):
+    """Ensure the CBB_Collision collection exists and return it"""
+    collection_name = context.scene.cursor_bbox_collection_name
+    
+    # Check if collection exists
+    if collection_name in bpy.data.collections:
+        return bpy.data.collections[collection_name]
+    
+    # Create new collection
+    new_collection = bpy.data.collections.new(collection_name)
+    context.scene.collection.children.link(new_collection)
+    return new_collection

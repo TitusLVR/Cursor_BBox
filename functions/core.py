@@ -1,10 +1,11 @@
 import bpy
 import bmesh
-from mathutils import Vector
+from mathutils import Vector, Matrix
 import time
 from functools import lru_cache
-from .preferences import get_preferences
-from .draw import (
+from ..settings.preferences import get_preferences
+from .utils import ensure_cbb_collection
+from ..ui.draw import (
     GPUDrawingManager, 
     generate_bbox_geometry_optimized,
     enable_edge_highlight,
@@ -30,6 +31,7 @@ class CursorBBoxState:
         self.current_edge_data = None
         self.current_bbox_data = None
         self.marked_faces_visual_cache = {}
+        self.preview_faces_visual_cache = {}
         
         # Performance caches
         self.bbox_geometry_cache = {}
@@ -42,6 +44,7 @@ class CursorBBoxState:
         self.marked_faces.clear()
         self.marked_points.clear()
         self.marked_faces_visual_cache.clear()
+        self.preview_faces_visual_cache.clear()
         self.bbox_geometry_cache.clear()
         self.coordinate_transform_cache.clear()
         self.current_edge_data = None
@@ -268,6 +271,50 @@ def force_refresh_marked_faces():
         if face_indices:
             mark_faces_batch(obj, face_indices)
 
+def update_preview_faces(obj, face_indices):
+    """Update faces preview (transient highlight)"""
+    global _state
+    
+    # Clear previous preview
+    _state.preview_faces_visual_cache.clear()
+    _state.gpu_manager.clear_cache_prefix('preview_faces_')
+    
+    if not obj or not face_indices or obj.type != 'MESH':
+        return
+        
+    vertices = []
+    mesh = obj.data
+    obj_mat = obj.matrix_world
+    
+    # Process faces
+    for face_idx in face_indices:
+        if face_idx >= len(mesh.polygons):
+            continue
+        
+        face = mesh.polygons[face_idx]
+        face_verts = [obj_mat @ mesh.vertices[i].co for i in face.vertices]
+        
+        # Triangulate
+        if len(face_verts) == 3:
+            vertices.extend(face_verts)
+        else:
+            # Fan triangulation
+            for i in range(1, len(face_verts) - 1):
+                vertices.extend([face_verts[0], face_verts[i], face_verts[i + 1]])
+    
+    if vertices:
+        _state.preview_faces_visual_cache[obj.name] = vertices
+    
+    # Ensure handlers enabled
+    if 'face_marking' not in _state.handlers:
+        enable_face_marking(_state)
+
+def clear_preview_faces():
+    """Clear face preview"""
+    global _state
+    _state.preview_faces_visual_cache.clear()
+    _state.gpu_manager.clear_cache_prefix('preview_faces_')
+
 # ===== BBOX CALCULATIONS =====
 
 def calculate_bbox_bounds_optimized(world_coords, cursor_location, cursor_rotation):
@@ -385,13 +432,219 @@ def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cur
             'dimensions': dimensions
         }
 
-        # Force clear bbox cache to ensure visual update
-        _state.gpu_manager.clear_cache_key('bbox_faces')
         _state.gpu_manager.clear_cache_key('bbox_edges')
 
     except Exception as e:
         print(f"Error updating marked faces bbox: {e}")
         _state.current_bbox_data = None
+
+
+def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points=None):
+    """Update preview with convex hull of marked faces/points"""
+    global _state
+    
+    try:
+        all_vertices = []
+
+        # Collect vertices from marked faces
+        for obj, face_indices in marked_faces_dict.items():
+            if not face_indices or obj.type != 'MESH':
+                continue
+
+            mesh = obj.data
+            obj_mat = obj.matrix_world
+
+            # Batch process face vertices
+            for face_idx in face_indices:
+                if face_idx >= len(mesh.polygons):
+                    continue
+
+                face = mesh.polygons[face_idx]
+                all_vertices.extend([obj_mat @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+
+        # Add marked points
+        if marked_points:
+            all_vertices.extend(marked_points)
+
+        if not all_vertices:
+            # No vertices means no bbox to show
+            _state.current_bbox_data = None
+            # Force clear bbox cache
+            _state.gpu_manager.clear_cache_key('bbox_faces')
+            _state.gpu_manager.clear_cache_key('bbox_edges')
+            return
+
+        # Re-enable bbox preview if it was disabled
+        if 'bbox_preview' not in _state.handlers:
+            enable_bbox_preview(_state)
+
+        # Calculate Convex Hull
+        bm = bmesh.new()
+        for v in all_vertices:
+            bm.verts.new(v)
+        bm.verts.ensure_lookup_table()
+        
+        # Calculate hull
+        bmesh.ops.convex_hull(bm, input=bm.verts)
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+        # Apply push value (inflate)
+        if abs(push_value) > 0.0001:
+            vert_normals = {v: Vector((0,0,0)) for v in bm.verts}
+            for f in bm.faces:
+                for v in f.verts:
+                    vert_normals[v] += f.normal
+            
+            for v in bm.verts:
+                if vert_normals[v].length_squared > 0:
+                    normal = vert_normals[v].normalized()
+                    v.co += normal * push_value
+
+        # Prepare for drawing
+        # Triangulate for face drawing
+        bmesh.ops.triangulate(bm, faces=bm.faces)
+        
+        face_verts = []
+        for f in bm.faces:
+             for v in f.verts:
+                 face_verts.append(v.co.copy())
+        
+        edge_verts = []
+        for e in bm.edges:
+            edge_verts.append(e.verts[0].co.copy())
+            edge_verts.append(e.verts[1].co.copy())
+            
+        bm.free()
+
+        _state.current_bbox_data = {
+            'edges': edge_verts,
+            'faces': face_verts,
+            'center': Vector((0,0,0)), 
+            'dimensions': Vector((0,0,0))
+        }
+
+        # Force clear bbox cache to ensure visual update
+        _state.gpu_manager.clear_cache_key('bbox_faces')
+        _state.gpu_manager.clear_cache_key('bbox_edges')
+
+    except Exception as e:
+        print(f"Error updating convex hull preview: {e}")
+        _state.current_bbox_data = None
+
+def update_marked_faces_sphere(marked_faces_dict, marked_points=None):
+    """Update preview with bounding sphere of marked faces/points"""
+    global _state
+    
+    try:
+        all_vertices = []
+
+        # Collect vertices from marked faces
+        for obj, face_indices in marked_faces_dict.items():
+            if not face_indices or obj.type != 'MESH':
+                continue
+
+            mesh = obj.data
+            obj_mat = obj.matrix_world
+
+            # Batch process face vertices
+            for face_idx in face_indices:
+                if face_idx >= len(mesh.polygons):
+                    continue
+
+                face = mesh.polygons[face_idx]
+                all_vertices.extend([obj_mat @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+
+        # Add marked points
+        if marked_points:
+            all_vertices.extend(marked_points)
+
+        if not all_vertices:
+            _state.current_bbox_data = None
+            _state.gpu_manager.clear_cache_key('bbox_faces')
+            _state.gpu_manager.clear_cache_key('bbox_edges')
+            return
+
+        # Re-enable bbox preview if it was disabled
+        if 'bbox_preview' not in _state.handlers:
+            enable_bbox_preview(_state)
+
+        # Calculate Center and Radius
+        min_co = Vector(all_vertices[0])
+        max_co = Vector(all_vertices[0])
+        
+        for v in all_vertices:
+            min_co.x = min(min_co.x, v.x)
+            min_co.y = min(min_co.y, v.y)
+            min_co.z = min(min_co.z, v.z)
+            max_co.x = max(max_co.x, v.x)
+            max_co.y = max(max_co.y, v.y)
+            max_co.z = max(max_co.z, v.z)
+            
+        center = (min_co + max_co) / 2.0
+        
+        radius = 0.0
+        for v in all_vertices:
+            dist = (v - center).length
+            if dist > radius:
+                radius = dist
+        
+        radius = max(radius, 0.05)
+                
+        # Generate Sphere Geometry
+        bm = bmesh.new()
+        
+        # Create unit sphere at origin
+        try:
+            bmesh.ops.create_uvsphere(
+                bm, 
+                u_segments=32, 
+                v_segments=16, 
+                diameter=1.0
+            )
+        except TypeError:
+             # Fallback if arguments differ (e.g. radius instead of diameter)
+            bmesh.ops.create_uvsphere(
+                bm, 
+                u_segments=32, 
+                v_segments=16, 
+                radius=0.5
+            )
+        
+        # Scale and Translate
+        mat = Matrix.Translation(center) @ Matrix.Scale(radius * 2, 4)
+        
+        bmesh.ops.transform(bm, matrix=mat, verts=list(bm.verts))
+        
+        # Triangulate for face drawing
+        bmesh.ops.triangulate(bm, faces=bm.faces)
+        
+        face_verts = []
+        for f in bm.faces:
+             for v in f.verts:
+                 face_verts.append(v.co.copy())
+        
+        edge_verts = []
+        for e in bm.edges:
+            edge_verts.append(e.verts[0].co.copy())
+            edge_verts.append(e.verts[1].co.copy())
+            
+        bm.free()
+
+        _state.current_bbox_data = {
+            'edges': edge_verts,
+            'faces': face_verts,
+            'center': center,
+            'dimensions': Vector((radius*2, radius*2, radius*2))
+        }
+
+        # Force clear bbox cache to ensure visual update
+        _state.gpu_manager.clear_cache_key('bbox_faces')
+        _state.gpu_manager.clear_cache_key('bbox_edges')
+
+    except Exception as e:
+        print(f"Error updating sphere preview: {e}")
+        _state.current_bbox_data = None
+
 
 # ===== MAIN FUNCTIONS =====
 
@@ -562,12 +815,13 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
             )
             
             bbox_obj = context.active_object
-            name_parts = []
-            if marked_faces:
-                name_parts.append("Faces")
-            if marked_points:
-                name_parts.append("Points")
-            bbox_obj.name = f"CursorBBox{'_'.join(name_parts)}" if name_parts else "CursorBBox_Marked"
+            bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
+            
+            # Move to CBB_Collision collection
+            cbb_coll = ensure_cbb_collection(context)
+            for coll in bbox_obj.users_collection:
+                coll.objects.unlink(bbox_obj)
+            cbb_coll.objects.link(bbox_obj)
             bbox_obj.scale = dimensions
             bbox_obj.show_wire = show_wire
             bbox_obj.show_all_edges = show_all_edges
@@ -657,7 +911,13 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                     )
 
                     bbox_obj = context.active_object
-                    bbox_obj.name = "CursorBBox"
+                    bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
+
+                    # Move to CBB_Collision collection
+                    cbb_coll = ensure_cbb_collection(context)
+                    for coll in bbox_obj.users_collection:
+                        coll.objects.unlink(bbox_obj)
+                    cbb_coll.objects.link(bbox_obj)
                     bbox_obj.scale = dimensions
                     bbox_obj.show_wire = show_wire
                     bbox_obj.show_all_edges = show_all_edges
@@ -729,7 +989,13 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                     )
 
                     bbox_obj = context.active_object
-                    bbox_obj.name = "CursorBBox"
+                    bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
+
+                    # Move to CBB_Collision collection
+                    cbb_coll = ensure_cbb_collection(context)
+                    for coll in bbox_obj.users_collection:
+                        coll.objects.unlink(bbox_obj)
+                    cbb_coll.objects.link(bbox_obj)
                     bbox_obj.scale = dimensions
                     bbox_obj.show_wire = show_wire
                     bbox_obj.show_all_edges = show_all_edges

@@ -2,7 +2,7 @@ import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
-from .preferences import get_preferences
+from ..settings.preferences import get_preferences
 from functools import lru_cache
 
 # ===== GPU DRAWING MANAGER =====
@@ -198,8 +198,39 @@ def draw_marked_points(gpu_manager, marked_points, base_color):
         # Reset point size
         gpu.state.point_size_set(1.0)
         
+        gpu.state.point_size_set(1.0)
+        
     except Exception as e:
         print(f"Error drawing point dots: {e}")
+
+def draw_preview_faces(gpu_manager, preview_faces_visual_cache):
+    """Draw preview faces (hover highlight)"""
+    if not preview_faces_visual_cache:
+        return
+        
+    # Cyan color for preview, slightly transparent
+    preview_color = (0.0, 1.0, 1.0, 0.2)
+    
+    # Set up GPU state
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('LESS_EQUAL') # Preview can be behind objects slightly, or on top?
+    # Let's draw on top like marked faces to be visible
+    gpu.state.depth_test_set('ALWAYS')
+    
+    shader = gpu_manager.get_shader('UNIFORM_COLOR')
+    shader.uniform_float("color", preview_color)
+    
+    for obj_name, face_vertices in preview_faces_visual_cache.items():
+        if face_vertices:
+            batch = gpu_manager.get_cached_batch(
+                f'preview_faces_{obj_name}', 'TRIS', face_vertices
+            )
+            if batch:
+                batch.draw(shader)
+                
+    # Reset GPU state
+    gpu.state.blend_set('NONE')
+    gpu.state.depth_test_set('LESS_EQUAL')
 
 def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points):
     """Optimized face marking with batch caching - draws on top"""
@@ -307,6 +338,9 @@ def create_edge_highlight_handler(state):
 def create_face_marking_handler(state):
     """Create face marking drawing handler"""
     def draw_marked_faces_wrapper():
+        # Draw preview first (so marked faces draw on top if they overlap)
+        if hasattr(state, 'preview_faces_visual_cache'):
+             draw_preview_faces(state.gpu_manager, state.preview_faces_visual_cache)
         draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points)
     return draw_marked_faces_wrapper
 

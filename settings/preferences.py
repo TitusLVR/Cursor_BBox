@@ -1,25 +1,19 @@
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, StringProperty
+from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, StringProperty, EnumProperty
 
 class CursorBBoxPreferences(AddonPreferences):
     """Addon preferences for Cursor Aligned Bounding Box"""
-    bl_idname = __package__
+    bl_idname = "Cursor_BBox"
     
-    # Default values
-    default_push_value: FloatProperty(
-        name="Default Push Value",
-        description="Default push value for new bounding boxes",
-        default=0.01,
-        min=-1.0,
-        max=1.0,
-        precision=3
-    )
-    
-    default_align_to_face: BoolProperty(
-        name="Default Align to Face",
-        description="Default setting for face alignment",
-        default=True
+    # Tab selection
+    active_tab: EnumProperty(
+        name="Active Tab",
+        items=[
+            ('KEYMAPS', "Keymaps", "Edit keyboard shortcuts"),
+            ('UI', "UI", "Customize colors and appearance"),
+        ],
+        default='KEYMAPS'
     )
     
     # Edge highlight settings - Updated to #46FFB4
@@ -139,121 +133,103 @@ class CursorBBoxPreferences(AddonPreferences):
     def draw(self, context):
         layout = self.layout
         
-        # Default settings
-        box = layout.box()
-        box.label(text="Default Settings:", icon='SETTINGS')
-        
-        row = box.row()
-        row.prop(self, "default_push_value")
-        
-        row = box.row()
-        row.prop(self, "default_align_to_face")
-        
+        # Tab selection
+        row = layout.row()
+        row.prop(self, "active_tab", expand=True)
         layout.separator()
         
-        # BBox preview settings
-        box = layout.box()
-        box.label(text="Bounding Box Preview:", icon='GHOST_ENABLED')
-        
-        row = box.row()
-        row.prop(self, "bbox_preview_enabled")
-        
-        if self.bbox_preview_enabled:
-            row = box.row()
-            row.prop(self, "bbox_preview_color")
+        if self.active_tab == 'UI':
+            # BBox preview settings
+            box = layout.box()
+            box.label(text="Bounding Box Preview:", icon='GHOST_ENABLED')
             
             row = box.row()
-            row.prop(self, "bbox_preview_alpha")
+            row.prop(self, "bbox_preview_enabled")
+            
+            if self.bbox_preview_enabled:
+                row = box.row()
+                row.prop(self, "bbox_preview_color")
+                
+                row = box.row()
+                row.prop(self, "bbox_preview_alpha")
+                
+                row = box.row()
+                row.prop(self, "bbox_preview_line_width")
+                
+                row = box.row()
+                row.prop(self, "bbox_preview_show_faces")
+            
+            layout.separator()
+            
+            # Visual settings
+            box = layout.box()
+            box.label(text="Visual Settings:", icon='COLOR')
             
             row = box.row()
-            row.prop(self, "bbox_preview_line_width")
+            row.prop(self, "edge_highlight_color")
             
             row = box.row()
-            row.prop(self, "bbox_preview_show_faces")
-        
-        layout.separator()
-        
-        # Visual settings
-        box = layout.box()
-        box.label(text="Visual Settings:", icon='COLOR')
-        
-        row = box.row()
-        row.prop(self, "edge_highlight_color")
-        
-        row = box.row()
-        row.prop(self, "edge_highlight_width")
-        
-        layout.separator()
-        
-        # Face marking settings
-        box = layout.box()
-        box.label(text="Face Marking:", icon='FACE_MAPS')
-        
-        row = box.row()
-        row.prop(self, "face_marking_color")
-        
-        row = box.row()
-        row.prop(self, "face_marking_alpha")
-        
-        layout.separator()
-        
-        # Point marking settings
-        box = layout.box()
-        box.label(text="Point Marking:", icon='EMPTY_AXIS')
-        
-        row = box.row()
-        row.prop(self, "point_marking_color")
-        
-        row = box.row()
-        row.prop(self, "point_marking_alpha")
-        
-        row = box.row()
-        row.prop(self, "point_marking_size")
-        
-        layout.separator()
-        
-        # Bounding box display
-        box = layout.box()
-        box.label(text="Bounding Box Display:", icon='CUBE')
-        
-        row = box.row()
-        row.prop(self, "bbox_show_wire")
-        
-        row = box.row()
-        row.prop(self, "bbox_show_all_edges")
-        
-        layout.separator()
-        
-        # Color reference
-        box = layout.box()
-        box.label(text="Color Reference:", icon='INFO')
-        col = box.column(align=True)
-        col.label(text="• BBox Preview: White (#FFFFFF)")
-        col.label(text="• Edge Highlight: Mint Green (#46FFB4)")  
-        col.label(text="• Selected Faces: Light Blue (#51AAFB)")
-        col.label(text="• Point Markers: Mint Green (#46FFB4)")
-        
-        layout.separator()
-        
-        # Keymap shortcuts
-        box = layout.box()
-        box.label(text="Keyboard Shortcuts:", icon='KEY_HLT')
-        kc = bpy.context.window_manager.keyconfigs.addon
-        col = box.column()
-        if kc:
-            import sys
-            import rna_keymap_ui
-            addon_main = sys.modules[__package__]
-            for km, kmi in getattr(addon_main, "addon_keymaps", []):
-                col.context_pointer_set("keymap", km)
-                rna_keymap_ui.draw_kmi([], kc, km, kmi, col, 0)
-        else:
-            col.label(text="Keyconfig not found", icon='ERROR')
+            row.prop(self, "edge_highlight_width")
+            
+            layout.separator()
+            
+            # Face marking settings
+            box = layout.box()
+            box.label(text="Face Marking:", icon='FACE_MAPS')
+            
+            row = box.row()
+            row.prop(self, "face_marking_color")
+            
+            row = box.row()
+            row.prop(self, "face_marking_alpha")
+            
+            layout.separator()
+            
+            # Point marking settings
+            box = layout.box()
+            box.label(text="Point Marking:", icon='EMPTY_AXIS')
+            
+            row = box.row()
+            row.prop(self, "point_marking_color")
+            
+            row = box.row()
+            row.prop(self, "point_marking_alpha")
+            
+            row = box.row()
+            row.prop(self, "point_marking_size")
+            
+            layout.separator()
+            
+            # Bounding box display
+            box = layout.box()
+            box.label(text="Bounding Box Display:", icon='CUBE')
+            
+            row = box.row()
+            row.prop(self, "bbox_show_wire")
+            
+            row = box.row()
+            row.prop(self, "bbox_show_all_edges")
+            
+        elif self.active_tab == 'KEYMAPS':
+            # Keymap shortcuts
+            box = layout.box()
+            box.label(text="Keyboard Shortcuts:", icon='KEY_HLT')
+            kc = bpy.context.window_manager.keyconfigs.addon
+            col = box.column()
+            if kc:
+                import sys
+                import rna_keymap_ui
+                addon_main = sys.modules[__package__.split('.')[0]]
+                for km, kmi in getattr(addon_main, "addon_keymaps", []):
+                    col.context_pointer_set("keymap", km)
+                    rna_keymap_ui.draw_kmi([], kc, km, kmi, col, 0)
+            else:
+                col.label(text="Keyconfig not found", icon='ERROR')
 
 def get_preferences():
     """Get addon preferences"""
     try:
-        return bpy.context.preferences.addons[__package__].preferences
+        return bpy.context.preferences.addons["Cursor_BBox"].preferences
     except:
         return None
 
