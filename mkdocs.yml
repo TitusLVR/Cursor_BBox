@@ -1,4 +1,7 @@
 site_name: Cursor BBox Documentation
+site_url: ''
+site_dir: site
+
 theme:
   name: material
 

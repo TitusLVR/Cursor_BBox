@@ -31,13 +31,16 @@ jobs:
         run: |
           mkdocs --version
           mkdocs build --strict
+          echo "Checking site directory contents:"
           ls -la site/
+          echo "Checking for index.html:"
+          test -f site/index.html && echo "✓ index.html exists" || echo "✗ index.html NOT FOUND"
       - name: Setup Pages
         uses: actions/configure-pages@v4
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./site
+          path: site
 
   deploy:
     environment:
