@@ -7,15 +7,15 @@ theme:
   palette:
     # Dark theme
     - scheme: slate
-      primary: orange
-      accent: orange
+      primary: deep-orange
+      accent: deep-orange
       toggle:
         icon: material/brightness-7
         name: Switch to light mode
     # Light theme (fallback)
     - scheme: default
-      primary: orange
-      accent: orange
+      primary: deep-orange
+      accent: deep-orange
       toggle:
         icon: material/brightness-4
         name: Switch to dark mode
@@ -24,6 +24,8 @@ theme:
     - navigation.sections
     - navigation.expand
     - navigation.top
+    - navigation.index
+    - navigation.instant
     - search.suggest
     - search.highlight
     - content.code.annotate

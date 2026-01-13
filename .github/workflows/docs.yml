@@ -14,6 +14,8 @@ concurrency:
   group: "pages"
   cancel-in-progress: true
 
+# This ensures each push replaces the previous deployment
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -27,6 +29,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Clean previous build
+        run: |
+          rm -rf site/
       - name: Build documentation
         run: |
           mkdocs --version
@@ -41,6 +46,7 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
+          # This replaces any previous artifact for this workflow
 
   deploy:
     environment:
@@ -52,3 +58,4 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        # Each deployment replaces the previous one automatically
