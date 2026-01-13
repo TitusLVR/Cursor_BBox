@@ -1,0 +1,8 @@
+site_name: Cursor BBox Documentation
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage: usage.md
