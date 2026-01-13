@@ -72,13 +72,16 @@ class CursorBBox_PT_main(bpy.types.Panel):
         
         col = box.column(align=True)
         col.prop(scene, 'cursor_bbox_push', text="Push Offset")
-        col.prop(scene, 'cursor_bbox_align_face', text="Align to Face", toggle=True)
+        col.prop(scene, 'cursor_bbox_align_face', text="Align to Face", toggle=True)        
         
-        col.separator()
-        
+        col.separator()        
         # Coplanar Logic
         row = col.row(align=True)
         row.prop(scene, 'cursor_bbox_select_coplanar', text="Auto-Select Coplanar", toggle=True)
+        
+        col.separator()
+        col.prop(scene, 'cursor_bbox_use_material', text="Use Material")
+        col.prop(scene, 'cursor_bbox_material_color', text="Color")
         
         if scene.cursor_bbox_select_coplanar:
             sub = col.column(align=True)

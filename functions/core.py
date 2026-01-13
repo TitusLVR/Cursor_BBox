@@ -4,7 +4,7 @@ from mathutils import Vector, Matrix
 import time
 from functools import lru_cache
 from ..settings.preferences import get_preferences
-from .utils import ensure_cbb_collection
+from .utils import ensure_cbb_collection, ensure_cbb_material, assign_object_styles
 from ..ui.draw import (
     GPUDrawingManager, 
     generate_bbox_geometry_optimized,
@@ -822,6 +822,10 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
             for coll in bbox_obj.users_collection:
                 coll.objects.unlink(bbox_obj)
             cbb_coll.objects.link(bbox_obj)
+            
+            # Assign Styles
+            assign_object_styles(context, bbox_obj)
+
             bbox_obj.scale = dimensions
             bbox_obj.show_wire = show_wire
             bbox_obj.show_all_edges = show_all_edges
@@ -996,6 +1000,10 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                     for coll in bbox_obj.users_collection:
                         coll.objects.unlink(bbox_obj)
                     cbb_coll.objects.link(bbox_obj)
+                    
+                    # Assign Styles
+                    assign_object_styles(context, bbox_obj)
+
                     bbox_obj.scale = dimensions
                     bbox_obj.show_wire = show_wire
                     bbox_obj.show_all_edges = show_all_edges

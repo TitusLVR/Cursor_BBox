@@ -1123,3 +1123,46 @@ def ensure_cbb_collection(context):
     new_collection = bpy.data.collections.new(collection_name)
     context.scene.collection.children.link(new_collection)
     return new_collection
+
+def ensure_cbb_material(context):
+    """Ensure the Cursor BBox Material exists and return it"""
+    mat_name = "Cursor BBox Material"
+    
+    mat = bpy.data.materials.get(mat_name)
+    if not mat:
+        mat = bpy.data.materials.new(name=mat_name)
+        mat.use_nodes = True
+        
+    # Ensure it uses the color from properties
+    if mat.use_nodes and hasattr(context.scene, "cursor_bbox_material_color"):
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            color = list(context.scene.cursor_bbox_material_color) + [1.0]
+            bsdf.inputs['Base Color'].default_value = color
+            mat.diffuse_color = color
+            
+    return mat
+
+def assign_object_styles(context, obj):
+    """Assign materials and colors to object"""
+    # Assign Material if enabled
+    if getattr(context.scene, "cursor_bbox_use_material", False):
+        try:
+            mat = ensure_cbb_material(context)
+            if obj.data.materials:
+                obj.data.materials[0] = mat
+            else:
+                obj.data.materials.append(mat)
+        except Exception as e:
+            print(f"Failed to assign material: {e}")
+    
+    # Assign Object Color (Independent)
+    try:
+        # We assume property exists if it's registered
+        # But use getattr with default to be safe against attribute errors
+        color_prop = getattr(context.scene, "cursor_bbox_material_color", (1.0, 0.5, 0.0))
+        # Ensure it's a list/tuple
+        color = list(color_prop) + [1.0]
+        obj.color = color
+    except Exception as e:
+        print(f"Failed to assign object color: {e}")

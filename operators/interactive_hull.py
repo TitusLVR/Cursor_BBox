@@ -2,7 +2,7 @@ import bpy
 import bmesh
 from mathutils import Vector
 from math import radians, degrees
-from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, get_connected_coplanar_faces, ensure_cbb_collection
+from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, get_connected_coplanar_faces, ensure_cbb_collection, ensure_cbb_material, assign_object_styles
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
     disable_edge_highlight_wrapper as disable_edge_highlight,
@@ -102,6 +102,9 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         obj = bpy.data.objects.new(hull_name, mesh_data)
         cbb_coll = ensure_cbb_collection(context)
         cbb_coll.objects.link(obj)
+        
+        # Assign Styles
+        assign_object_styles(context, obj)
         
         # Handle Selection: Keep original ACTIVE and SELECTED
         

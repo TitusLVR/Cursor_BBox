@@ -2,7 +2,7 @@ import bpy
 import bmesh
 from mathutils import Vector
 from math import radians, degrees
-from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, get_connected_coplanar_faces, ensure_cbb_collection
+from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, get_connected_coplanar_faces, ensure_cbb_collection, ensure_cbb_material, assign_object_styles
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
     disable_edge_highlight_wrapper as disable_edge_highlight,
@@ -95,6 +95,9 @@ def create_bounding_sphere_from_marked(marked_faces_dict, marked_points=None):
     for coll in obj.users_collection:
         coll.objects.unlink(obj)
     cbb_coll.objects.link(obj)
+    
+    # Assign Styles
+    assign_object_styles(context, obj)
     
     # Handle Selection
     for o in context.selected_objects:

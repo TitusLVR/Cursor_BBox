@@ -36,25 +36,68 @@ def register():
     bpy.types.Scene.cursor_bbox_name_box = bpy.props.StringProperty(
         name="Box Name",
         description="Name pattern for Box objects",
-        default="Cube"
+        default="BBox"
     )
     
     bpy.types.Scene.cursor_bbox_name_hull = bpy.props.StringProperty(
         name="Hull Name",
         description="Name pattern for Hull objects",
-        default="Convex"
+        default="ConvexHull"
     )
     
     bpy.types.Scene.cursor_bbox_name_sphere = bpy.props.StringProperty(
         name="Sphere Name",
         description="Name pattern for Sphere objects",
-        default="Sphere"
+        default="BSphere"
     )
     
     bpy.types.Scene.cursor_bbox_collection_name = bpy.props.StringProperty(
         name="Collection Name",
         description="Name of the collection for collision objects",
-        default="CBB_Collision"
+        default="CursorBBox"
+    )
+
+    def update_material_color(self, context):
+        """Update material color when property changes"""
+        rgba = list(self.cursor_bbox_material_color) + [1.0]
+        
+        # Update Material
+        mat = bpy.data.materials.get("Cursor BBox Material")
+        if mat:
+            mat.diffuse_color = rgba
+            if mat.use_nodes:
+                bsdf = mat.node_tree.nodes.get("Principled BSDF")
+                if bsdf:
+                    # Append alpha=1.0 (already done in rgba)
+                    bsdf.inputs['Base Color'].default_value = rgba
+
+        # Update Object Color for objects in the specific collection
+        coll_name = context.scene.cursor_bbox_collection_name
+        if coll_name in bpy.data.collections:
+            for obj in bpy.data.collections[coll_name].objects:
+                obj.color = rgba
+
+    bpy.types.Scene.cursor_bbox_material_color = bpy.props.FloatVectorProperty(
+        name="Material Color",
+        description="Color for Cursor BBox Material",
+        subtype='COLOR',
+        default=(1.0, 0.58, 0.231), # #FF943B
+        min=0.0,
+        max=1.0,
+        update=update_material_color
+    )
+
+    def update_use_material(self, context):
+        """Update material usage"""
+        if self.cursor_bbox_use_material:
+            # If turning on, apply color immediately
+            update_material_color(self, context)
+
+    bpy.types.Scene.cursor_bbox_use_material = bpy.props.BoolProperty(
+        name="Use Material",
+        description="Apply material and color to created objects",
+        default=False,
+        update=update_use_material
     )
 
 def unregister():
@@ -67,3 +110,5 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_name_hull
     del bpy.types.Scene.cursor_bbox_name_sphere
     del bpy.types.Scene.cursor_bbox_collection_name
+    del bpy.types.Scene.cursor_bbox_material_color
+    del bpy.types.Scene.cursor_bbox_use_material
