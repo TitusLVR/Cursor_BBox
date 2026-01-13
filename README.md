@@ -20,7 +20,7 @@ Blender addon for precise cursor placement and cursor-aligned bounding box creat
 
 ## Requirements
 
-- Blender 3.0+
+- Blender 5.xx
 - GPU with OpenGL support
 
 For detailed usage, controls, and workflows, see the [full documentation](https://tituslvr.github.io/Cursor_BBox/).

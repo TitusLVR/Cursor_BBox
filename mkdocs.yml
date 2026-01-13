@@ -1,24 +1,26 @@
 site_name: Cursor BBox Documentation
 site_url: https://tituslvr.github.io/Cursor_BBox/
 site_dir: site
+docs_dir: docs
+
+extra_css:
+  - docs/overrides/stylesheets/extra.css
 
 theme:
   name: material
   custom_dir: docs/overrides
-  custom_css:
-    - stylesheets/extra.css
   palette:
     # Dark theme
     - scheme: slate
-      primary: deep-orange
-      accent: deep-orange
+      primary: blue-grey
+      accent: blue-grey
       toggle:
         icon: material/brightness-7
         name: Switch to light mode
     # Light theme (fallback)
     - scheme: default
-      primary: deep-orange
-      accent: deep-orange
+      primary: blue-grey
+      accent: blue-grey
       toggle:
         icon: material/brightness-4
         name: Switch to dark mode
@@ -29,6 +31,7 @@ theme:
     - navigation.top
     - navigation.index
     - navigation.instant
+    - navigation.sidebar
     - search.suggest
     - search.highlight
     - content.code.annotate

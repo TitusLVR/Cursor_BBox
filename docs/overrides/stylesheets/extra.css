@@ -1,6 +1,7 @@
 /* Dark grey header for Material theme */
 .md-header {
   background-color: #2d2d2d !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2) !important;
 }
 
 .md-header--shadow {
@@ -9,5 +10,36 @@
 
 /* Ensure header text is visible */
 .md-header__title {
+  color: #ffffff !important;
+}
+
+.md-header__button {
+  color: #ffffff !important;
+}
+
+.md-header__button:hover {
+  color: rgba(255, 255, 255, 0.7) !important;
+}
+
+/* Override primary color for header */
+.md-header[data-md-state="shadow"] {
+  background-color: #2d2d2d !important;
+}
+
+/* Navigation tabs */
+.md-tabs {
+  background-color: #2d2d2d !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2) !important;
+}
+
+.md-tabs__link {
+  color: rgba(255, 255, 255, 0.7) !important;
+}
+
+.md-tabs__link--active {
+  color: #ffffff !important;
+}
+
+.md-tabs__link:hover {
   color: #ffffff !important;
 }
