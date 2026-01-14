@@ -272,7 +272,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             return {'RUNNING_MODAL'}
             
         # Cancel
-        elif event.type in {'ESC', 'RIGHTMOUSE'}:
+        elif event.type == 'ESC':
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
@@ -281,6 +281,17 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'CANCELLED'}
+
+        # Finished
+        elif event.type == 'RIGHTMOUSE':
+            disable_edge_highlight()
+            disable_bbox_preview()
+            disable_face_marking()
+            clear_all_markings()
+            clear_preview_faces()
+            context.area.header_text_set(None)
+            context.area.tag_redraw()
+            return {'FINISHED'}
             
         return {'RUNNING_MODAL'}
 

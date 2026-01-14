@@ -69,8 +69,8 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         )
         
 
-        # Cancel (RMB or Esc)
-        if event.type in {'ESC', 'RIGHTMOUSE'}:
+        # Cancel (Esc)
+        if event.type == 'ESC':
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
@@ -78,6 +78,16 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             clear_preview_faces()
             context.area.header_text_set(None)
             return {'CANCELLED'}
+
+        # Finished (RMB)
+        if event.type == 'RIGHTMOUSE':
+            disable_edge_highlight()
+            disable_bbox_preview()
+            disable_face_marking()
+            clear_all_markings()
+            clear_preview_faces()
+            context.area.header_text_set(None)
+            return {'FINISHED'}
 
         # Coplanar Angle Adjustment (Shift + Scroll)
         if event.shift and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:

@@ -98,11 +98,17 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
                 self.report({'WARNING'}, "No suitable snap target found")
             return {'RUNNING_MODAL'}
         
-        elif event.type in {'ESC', 'RIGHTMOUSE'}:
+        elif event.type == 'ESC':
             disable_edge_highlight()
             disable_bbox_preview()
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
+
+        elif event.type == 'RIGHTMOUSE':
+            disable_edge_highlight()
+            disable_bbox_preview()
+            context.area.header_text_set(None)  # Clear status bar
+            return {'FINISHED'}
         
         return {'RUNNING_MODAL'}
     
