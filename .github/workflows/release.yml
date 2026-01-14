@@ -57,26 +57,25 @@ jobs:
       - name: Create addon zip
         if: steps.check_tag.outputs.exists == 'false'
         run: |
-          # Create zip excluding unnecessary files
-          # Include README.md but exclude other markdown files in docs
-          zip -r cursor_bbox.zip . \
-            -x "*.git*" \
-            -x "*__pycache__*" \
-            -x "*.pyc" \
-            -x "*.pyo" \
-            -x "*.pyd" \
-            -x "docs/*" \
-            -x ".github/*" \
-            -x "mkdocs.yml" \
-            -x "requirements.txt" \
-            -x "site/*" \
-            -x ".vscode/*" \
-            -x ".gitignore" \
-            -x "*.temp*" \
-            -x "*.snippet*"
+          # Prepare staging directory
+          mkdir -p release_tmp/Cursor_BBox
           
-          echo "Created cursor_bbox.zip"
-          ls -lh cursor_bbox.zip
+          # Copy extension files
+          cp __init__.py release_tmp/Cursor_BBox/
+          cp -r functions release_tmp/Cursor_BBox/
+          cp -r operators release_tmp/Cursor_BBox/
+          cp -r settings release_tmp/Cursor_BBox/
+          cp -r ui release_tmp/Cursor_BBox/
+          
+          # Remove any pycache that might have been copied
+          find release_tmp/Cursor_BBox -name "__pycache__" -type d -exec rm -rf {} +
+          
+          # Zip the staged directory
+          cd release_tmp
+          zip -r "../Cursor_BBox_${{ steps.version.outputs.tag }}.zip" Cursor_BBox
+          cd ..
+          
+          echo "Created Cursor_BBox_${{ steps.version.outputs.tag }}.zip"
 
       - name: Create Git tag
         if: steps.check_tag.outputs.exists == 'false'
@@ -96,13 +95,13 @@ jobs:
             ## Cursor Aligned Bounding Box ${{ steps.version.outputs.tag }}
             
             ### Installation
-            1. Download `cursor_bbox.zip`
+            1. Download `Cursor_BBox_${{ steps.version.outputs.tag }}.zip`
             2. In Blender, go to Edit > Preferences > Add-ons
             3. Click "Install..." and select the zip file
             4. Enable "Cursor Aligned Bounding Box"
             
             ### Documentation
             Full documentation available at: https://tituslvr.github.io/Cursor_BBox/
-          files: cursor_bbox.zip
+          files: Cursor_BBox_${{ steps.version.outputs.tag }}.zip
           draft: false
           prerelease: false
