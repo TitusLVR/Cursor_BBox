@@ -2,7 +2,8 @@
 
 Blender addon for precise cursor placement and cursor-aligned bounding box creation with advanced marking and snapping features.
 
-📖 **[Full Documentation](https://tituslvr.github.io/Cursor_BBox/)**
+📖 **[Full Documentation](https://tituslvr.github.io/Cursor_BBox/)** | 📂 **[GitHub Repository](https://github.com/TitusLVR/Cursor_BBox)** | ⬇️ **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
+
 
 ## Features
 

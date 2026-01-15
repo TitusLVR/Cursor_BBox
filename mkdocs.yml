@@ -3,6 +3,9 @@ site_url: https://tituslvr.github.io/Cursor_BBox/
 site_dir: site
 docs_dir: docs
 
+repo_url: https://github.com/TitusLVR/Cursor_BBox
+repo_name: TitusLVR/Cursor_BBox
+
 extra_css:
   - docs/overrides/stylesheets/extra.css
 
@@ -25,7 +28,6 @@ theme:
         icon: material/brightness-4
         name: Switch to dark mode
   features:
-    - navigation.tabs
     - navigation.sections
     - navigation.expand
     - navigation.top

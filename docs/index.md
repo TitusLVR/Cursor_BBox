@@ -2,6 +2,14 @@
 
 A powerful Blender addon for precise 3D cursor placement and intelligent bounding shape creation. Create perfectly aligned bounding boxes, convex hulls, and bounding spheres with advanced marking, snapping, and visual feedback features.
 
+![Cursor BBox Addon](img/cursor_bbox_addon.png)
+
+## Useful Links
+
+- **GitHub Repository**: [https://github.com/TitusLVR/Cursor_BBox](https://github.com/TitusLVR/Cursor_BBox)
+- **Releases**: [https://github.com/TitusLVR/Cursor_BBox/releases](https://github.com/TitusLVR/Cursor_BBox/releases)
+
+
 ## Overview
 
 Cursor BBox revolutionizes how you work with bounding volumes in Blender. Instead of manually aligning objects or using basic bounding box tools, this addon provides an interactive, modal workflow that lets you:
