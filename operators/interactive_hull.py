@@ -21,10 +21,13 @@ from ..functions.core import (
     clear_all_markings,
     update_marked_faces_convex_hull,
     update_preview_faces,
-    clear_preview_faces
+    clear_preview_faces,
+    toggle_backface_rendering,
+    get_backface_rendering
 )
 
-def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0):
+
+def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False):
     """Create a convex hull from marked faces and points"""
     context = bpy.context
     all_vertices = []
@@ -39,7 +42,15 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
             if not face_indices or obj.type != 'MESH':
                 continue
             
-            mesh = obj.data
+            if use_depsgraph:
+                try:
+                    eval_obj = obj.evaluated_get(context.view_layer.depsgraph)
+                    mesh = eval_obj.data
+                except:
+                    mesh = obj.data
+            else:
+                mesh = obj.data
+            
             obj_mat_world = obj.matrix_world
             
             for face_idx in face_indices:
@@ -74,10 +85,6 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         # Apply Push Value (Inflate along normals)
         if abs(push_value) > 0.0001:
             # Simple vertex normal calculation
-            # Note: bmesh doesn't maintain vertex normals automatically valid after ops without update
-            # But we can approximate by averaging face normals
-            
-            # Create a dictionary for vert normals
             vert_normals = {v: Vector((0,0,0)) for v in bm.verts}
             for f in bm.faces:
                 for v in f.verts:
@@ -88,53 +95,57 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
                 if vert_normals[v].length_squared > 0:
                     normal = vert_normals[v].normalized()
                     v.co += normal * push_value
-                    
+        
+        # Calculate Center (Centroid/Geometry Center) explicitly
+        if len(bm.verts) > 0:
+            center_of_geometry = Vector((0.0, 0.0, 0.0))
+            for v in bm.verts:
+                center_of_geometry += v.co
+            center_of_geometry /= len(bm.verts)
+            
+            # Move geometry to local origin
+            bmesh.ops.translate(bm, verts=bm.verts, vec=-center_of_geometry)
+        else:
+            center_of_geometry = Vector((0.0, 0.0, 0.0))
+            
         # Create object
         mesh_data = bpy.data.meshes.new("ConvexHull")
         bm.to_mesh(mesh_data)
         bm.free()
         
-        if not context.scene.cursor_bbox_name_hull: # Fallback if property not initialized? No, default handles it.
+        if not context.scene.cursor_bbox_name_hull:
              hull_name = "Convex"
         else:
              hull_name = context.scene.cursor_bbox_name_hull
              
         obj = bpy.data.objects.new(hull_name, mesh_data)
+        
+        # Set location to calculated center
+        obj.location = center_of_geometry
+        
         cbb_coll = ensure_cbb_collection(context)
         cbb_coll.objects.link(obj)
         
         # Assign Styles
         assign_object_styles(context, obj)
         
-        # Handle Selection: Keep original ACTIVE and SELECTED
-        
-        # Deselect everything first to ensure clean state for the new object (optional, but good for clarity)
-        # But user wants to KEEP selection.
-        
-        # Strategy: 
-        # 1. Ensure new object is selected (so user sees it)
-        # 2. Ensure original objects are selected
-        # 3. Ensure original active is active.
-        
+        # Handle Selection
         for o in context.selected_objects:
             o.select_set(False)
             
-        # Select original objects
         for o in original_selected:
             try:
                 o.select_set(True)
             except:
                 pass
                 
-        # Select new Hull
-        obj.select_set(True)
-        
-        # Restore active object
-        if original_active:
-            context.view_layer.objects.active = original_active
-        else:
-            # If no original active, make hull active
+        if select_new_object:
+            obj.select_set(True)
             context.view_layer.objects.active = obj
+        else:
+            obj.select_set(False)
+            if original_active:
+                context.view_layer.objects.active = original_active
         
         return True
         
@@ -162,6 +173,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
     marked_faces = {}
     marked_points = []
     original_selected_objects = set()
+    use_depsgraph = False
     
     def modal(self, context, event):
         # Update status bar
@@ -174,10 +186,62 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             if has_points: parts.append(f"{len(self.marked_points)} Points")
             status_text += f" | Marked: {', '.join(parts)}"
         
+        deps_state = "ON" if self.use_depsgraph else "OFF"
+        coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
+        backface_state = "ON" if get_backface_rendering() else "OFF"
         context.area.header_text_set(
-            f"{status_text} | LMB: Mark/Unmark | C: Toggle | Shift(+Ctrl)+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | A: Add Point | Z: Clear"
+            f"{status_text} | LMB: Mark/Unmark | C: Coplanar ({coplanar_state}) | P: Backfaces ({backface_state}) | D: Depsgraph ({deps_state}) | 1-7: Angle Presets | Shift(+Ctrl)+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | A: Add Point | Z: Clear"
         )
         
+        # Toggle Depsgraph (D)
+        if event.type == 'D' and event.value == 'PRESS':
+            self.use_depsgraph = not self.use_depsgraph
+            # Rebuild visuals with new setting
+            for obj, faces in self.marked_faces.items():
+                rebuild_marked_faces_visual_data(obj, faces, use_depsgraph=self.use_depsgraph)
+            
+            # Update Preview
+            update_marked_faces_convex_hull(self.marked_faces, self.push_value, 
+                                   marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+            
+            # Need to update preview if active
+            # update_marked_faces_convex_hull likely needs update too - but I can't edit it yet as I haven't seen it in core.py fully.
+            # Assuming it takes dict. It calculates hull from points.
+            # But the POINTS come from `marked_faces` dict logic inside it?
+            # Actually `update_marked_faces_convex_hull` is imported from core?
+            # Yes, line 22. 
+            # I must assume I need to update THAT function signature in `core.py` as well.
+            # For now let's pass it if possible, but python will error if sig mismatch.
+            # So I will edit `core.py` next for `update_marked_faces_convex_hull`.
+            self.report({'INFO'}, f"Depsgraph: {'ON' if self.use_depsgraph else 'OFF'}")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        # Toggle Backface Rendering (P)
+        elif event.type == 'P' and event.value == 'PRESS':
+             new_state = toggle_backface_rendering()
+             state_str = "ON" if new_state else "OFF"
+             self.report({'INFO'}, f"Backface Rendering: {state_str}")
+             context.area.tag_redraw()
+             return {'RUNNING_MODAL'}
+             
+        # Coplanar Angle Presets (1-7)
+        elif event.type in {'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN'} and event.value == 'PRESS':
+             angle_map = {
+                 'ONE': 5,
+                 'TWO': 15,
+                 'THREE': 35,
+                 'FOUR': 45,
+                 'FIVE': 90,
+                 'SIX': 120,
+                 'SEVEN': 180
+             }
+             new_angle = angle_map[event.type]
+             context.scene.cursor_bbox_coplanar_angle = radians(new_angle)
+             self.report({'INFO'}, f"Coplanar Angle Set: {new_angle}°")
+             context.area.tag_redraw()
+             return {'RUNNING_MODAL'}
+
         # Coplanar Angle Adjustment (Shift + Scroll)
         if event.shift and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
             current_deg = degrees(context.scene.cursor_bbox_coplanar_angle)
@@ -206,7 +270,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} and event.value == 'PRESS':
             
             if self.marked_faces or self.marked_points:
-                if create_convex_hull_from_marked(self.marked_faces, self.marked_points, self.push_value):
+                if create_convex_hull_from_marked(self.marked_faces, self.marked_points, self.push_value, use_depsgraph=self.use_depsgraph):
                     self.report({'INFO'}, "Created Convex Hull. Ready for new selection.")
                     # Clear markings after successful creation
                     clear_all_markings()
@@ -228,7 +292,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             
         # Mark Face (LMB)
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            face_data = get_face_edges_from_raycast(context, event)
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
                 obj = face_data['object']
                 obj = face_data['object']
@@ -242,7 +306,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                     if context.scene.cursor_bbox_select_coplanar:
                          # Unmark coplanar group
                          angle_rad = context.scene.cursor_bbox_coplanar_angle
-                         coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad)
+                         coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
                          faces_to_process = coplanar_indices if coplanar_indices else {face_idx}
                     else:
                          faces_to_process = {face_idx}
@@ -261,14 +325,14 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                         clear_marked_faces() # Too aggressive? No.
                         # We deleted the key above. So we just need to clear visuals for this obj.
                         # rebuild_marked_faces_visual_data handles empty/deleted key too?
-                        rebuild_marked_faces_visual_data(obj, set())
+                        rebuild_marked_faces_visual_data(obj, set(), use_depsgraph=self.use_depsgraph)
                     else:
-                        rebuild_marked_faces_visual_data(obj, self.marked_faces[obj])
+                        rebuild_marked_faces_visual_data(obj, self.marked_faces[obj], use_depsgraph=self.use_depsgraph)
                 else:
                     # Mark logic
                     if context.scene.cursor_bbox_select_coplanar:
                          angle_rad = context.scene.cursor_bbox_coplanar_angle
-                         coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad)
+                         coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
                          faces_to_process = coplanar_indices if coplanar_indices else {face_idx}
                     else:
                          faces_to_process = {face_idx}
@@ -277,11 +341,11 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                         self.marked_faces[obj].add(idx)
                     
                     # Batch update visual
-                    rebuild_marked_faces_visual_data(obj, self.marked_faces[obj])
+                    rebuild_marked_faces_visual_data(obj, self.marked_faces[obj], use_depsgraph=self.use_depsgraph)
                 
                 # Update Preview
                 update_marked_faces_convex_hull(self.marked_faces, self.push_value, 
-                                       marked_points=self.marked_points)
+                                       marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
                 
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
@@ -297,7 +361,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         # Add Point (A)
         elif event.type == 'A' and event.value == 'PRESS':
             # Try to get point under mouse
-            face_data = get_face_edges_from_raycast(context, event)
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             
             if face_data:
                 # Use the hit location (intersection point)
@@ -311,14 +375,14 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             
             # Update Preview
             update_marked_faces_convex_hull(self.marked_faces, self.push_value, 
-                                   marked_points=self.marked_points)
+                                   marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
 
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
         # Mouse Move - Update Preview (Hover)
         elif event.type == 'MOUSEMOVE':
-            face_data = get_face_edges_from_raycast(context, event)
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
                 obj = face_data['object']
                 obj = face_data['object']
@@ -327,12 +391,12 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                 # Determine what would be selected
                 if context.scene.cursor_bbox_select_coplanar:
                      angle_rad = context.scene.cursor_bbox_coplanar_angle
-                     coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad)
+                     coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
                      faces_to_preview = coplanar_indices if coplanar_indices else {face_idx}
                 else:
                      faces_to_preview = {face_idx}
                 
-                update_preview_faces(obj, faces_to_preview)
+                update_preview_faces(obj, faces_to_preview, use_depsgraph=self.use_depsgraph)
                 context.area.tag_redraw()
             else:
                 clear_preview_faces()
@@ -373,12 +437,46 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
-        if context.area.type == 'VIEW_3D':
-            # Initialize from Scene properties
-            self.push_value = context.scene.cursor_bbox_push
+        # Initialize properties
+        self.push_value = context.scene.cursor_bbox_push
+        self.marked_faces = {}
+        self.marked_points = []
 
-            self.marked_faces = {}
-            self.marked_points = []
+        # Check for immediate execution in Edit Mode
+        if context.mode == 'EDIT_MESH':
+            objects_in_edit = [o for o in context.selected_objects if o.type == 'MESH' and o.mode == 'EDIT']
+            if context.active_object and context.active_object.mode == 'EDIT' and context.active_object not in objects_in_edit:
+                objects_in_edit.append(context.active_object)
+            
+            for obj in objects_in_edit:
+                bm = bmesh.from_edit_mesh(obj.data)
+                bm.faces.ensure_lookup_table()
+                selected_indices = {f.index for f in bm.faces if f.select}
+                if selected_indices:
+                    self.marked_faces[obj] = selected_indices
+            
+            if self.marked_faces:
+                active_obj = context.active_object
+                # Switch to Object Mode to allow object creation and selection operations
+                bpy.ops.object.mode_set(mode='OBJECT')
+                if create_convex_hull_from_marked(self.marked_faces, self.marked_points, self.push_value, select_new_object=False):
+                    # Restore Edit Mode
+                    if active_obj:
+                        context.view_layer.objects.active = active_obj
+                        bpy.ops.object.mode_set(mode='EDIT')
+                        
+                    self.report({'INFO'}, "Created Convex Hull from selection")
+                    return {'FINISHED'}
+                else:
+                     self.report({'WARNING'}, "Failed to create Convex Hull from selection")
+                     # If failed, we might be in Object Mode now. Restore Edit Mode if possible
+                     if active_obj:
+                        context.view_layer.objects.active = active_obj
+                        bpy.ops.object.mode_set(mode='EDIT')
+                     pass
+
+        if context.area.type == 'VIEW_3D':
+            # self.marked_faces and properties already initialized above
             
             # Store original selected objects to restrict interaction
             self.original_selected_objects = set(context.selected_objects)

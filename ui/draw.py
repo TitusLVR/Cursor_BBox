@@ -203,7 +203,8 @@ def draw_marked_points(gpu_manager, marked_points, base_color):
     except Exception as e:
         print(f"Error drawing point dots: {e}")
 
-def draw_preview_faces(gpu_manager, preview_faces_visual_cache):
+
+def draw_preview_faces(gpu_manager, preview_faces_visual_cache, show_backfaces=False):
     """Draw preview faces (hover highlight)"""
     if not preview_faces_visual_cache:
         return
@@ -216,6 +217,12 @@ def draw_preview_faces(gpu_manager, preview_faces_visual_cache):
     gpu.state.depth_test_set('LESS_EQUAL') # Preview can be behind objects slightly, or on top?
     # Let's draw on top like marked faces to be visible
     gpu.state.depth_test_set('ALWAYS')
+    
+    # Handle backface culling
+    if not show_backfaces:
+        gpu.state.face_culling_set('BACK')
+    else:
+        gpu.state.face_culling_set('NONE')
     
     shader = gpu_manager.get_shader('UNIFORM_COLOR')
     shader.uniform_float("color", preview_color)
@@ -231,8 +238,8 @@ def draw_preview_faces(gpu_manager, preview_faces_visual_cache):
     # Reset GPU state
     gpu.state.blend_set('NONE')
     gpu.state.depth_test_set('LESS_EQUAL')
-
-def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points):
+    gpu.state.face_culling_set('NONE')
+def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points, show_backfaces=False):
     """Optimized face marking with batch caching - draws on top"""
     if not marked_faces_visual_cache and not marked_points:
         return
@@ -251,6 +258,12 @@ def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points):
     gpu.state.blend_set('ALPHA')
     gpu.state.depth_test_set('ALWAYS')  # Always draw on top
     
+    # Handle backface culling
+    if not show_backfaces:
+        gpu.state.face_culling_set('BACK')
+    else:
+        gpu.state.face_culling_set('NONE')
+    
     shader = gpu_manager.get_shader('UNIFORM_COLOR')
     
     # Draw marked faces
@@ -265,6 +278,9 @@ def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points):
                 if batch:
                     batch.draw(shader)
     
+    # Reset culling for points
+    gpu.state.face_culling_set('NONE')
+
     # Draw marked points as dots only
     if marked_points:
         draw_marked_points(gpu_manager, marked_points, face_color)
@@ -340,8 +356,8 @@ def create_face_marking_handler(state):
     def draw_marked_faces_wrapper():
         # Draw preview first (so marked faces draw on top if they overlap)
         if hasattr(state, 'preview_faces_visual_cache'):
-             draw_preview_faces(state.gpu_manager, state.preview_faces_visual_cache)
-        draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points)
+             draw_preview_faces(state.gpu_manager, state.preview_faces_visual_cache, show_backfaces=getattr(state, 'show_backfaces', False))
+        draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points, show_backfaces=getattr(state, 'show_backfaces', False))
     return draw_marked_faces_wrapper
 
 def create_bbox_preview_handler(state):

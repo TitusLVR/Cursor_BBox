@@ -36,6 +36,9 @@ class CursorBBoxState:
         # Performance caches
         self.bbox_geometry_cache = {}
         self.coordinate_transform_cache = {}
+
+        # Visual settings
+        self.show_backfaces = False
         
     def cleanup(self):
         """Clean up all state and handlers"""
@@ -122,8 +125,8 @@ def get_marked_points_info():
 
 # ===== FACE MARKING =====
 
-def mark_faces_batch(obj, face_indices):
-    """Efficiently mark multiple faces at once"""
+def mark_faces_batch(obj, face_indices, use_depsgraph=False):
+    """Efficiently mark multiple faces at once, optionally using evaluated mesh"""
     global _state
     
     if obj.type != 'MESH':
@@ -142,8 +145,23 @@ def mark_faces_batch(obj, face_indices):
         return
     
     vertices = []
-    mesh = obj.data
-    obj_mat = obj.matrix_world
+    
+    if use_depsgraph:
+        depsgraph = bpy.context.view_layer.depsgraph
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            mesh = eval_obj.data
+            # Note: Do not use obj.matrix_world if vertices are already in world space from eval?
+            # Actually, eval mesh verts are usually in local space of object, 
+            # but modifiers might change that? Usually still local.
+            # But raycast returns EVAL geometry indices.
+            obj_mat = obj.matrix_world # Use original object matrix
+        except:
+            mesh = obj.data
+            obj_mat = obj.matrix_world
+    else:
+        mesh = obj.data
+        obj_mat = obj.matrix_world
     
     # Process all faces in one pass
     for face_idx in face_indices:
@@ -197,7 +215,7 @@ def unmark_face(obj, face_index):
     # Ensure proper handler state after unmarking
     ensure_handlers_enabled(_state)
 
-def rebuild_marked_faces_visual_data(obj, face_indices):
+def rebuild_marked_faces_visual_data(obj, face_indices, use_depsgraph=False):
     """Rebuild visual data for an object's marked faces"""
     global _state
     
@@ -216,7 +234,7 @@ def rebuild_marked_faces_visual_data(obj, face_indices):
     _state.marked_faces[obj] = set(face_indices)
     
     # Rebuild visual data
-    mark_faces_batch(obj, face_indices)
+    mark_faces_batch(obj, face_indices, use_depsgraph=use_depsgraph)
 
 def clear_marked_faces():
     """Clear all marked faces with proper cache cleanup"""
@@ -271,7 +289,7 @@ def force_refresh_marked_faces():
         if face_indices:
             mark_faces_batch(obj, face_indices)
 
-def update_preview_faces(obj, face_indices):
+def update_preview_faces(obj, face_indices, use_depsgraph=False):
     """Update faces preview (transient highlight)"""
     global _state
     
@@ -283,8 +301,19 @@ def update_preview_faces(obj, face_indices):
         return
         
     vertices = []
-    mesh = obj.data
-    obj_mat = obj.matrix_world
+    
+    if use_depsgraph:
+        depsgraph = bpy.context.view_layer.depsgraph
+        try:
+            eval_obj = obj.evaluated_get(depsgraph)
+            mesh = eval_obj.data
+            obj_mat = obj.matrix_world
+        except:
+            mesh = obj.data
+            obj_mat = obj.matrix_world
+    else:
+        mesh = obj.data
+        obj_mat = obj.matrix_world
     
     # Process faces
     for face_idx in face_indices:
@@ -298,7 +327,7 @@ def update_preview_faces(obj, face_indices):
         if len(face_verts) == 3:
             vertices.extend(face_verts)
         else:
-            # Fan triangulation
+            # Fan triangulation (continuing previous snippet logic)
             for i in range(1, len(face_verts) - 1):
                 vertices.extend([face_verts[0], face_verts[i], face_verts[i + 1]])
     
@@ -313,7 +342,18 @@ def clear_preview_faces():
     """Clear face preview"""
     global _state
     _state.preview_faces_visual_cache.clear()
-    _state.gpu_manager.clear_cache_prefix('preview_faces_')
+# ===== DRAWING STATE HELPERS =====
+
+def toggle_backface_rendering():
+    """Toggle backface rendering state"""
+    global _state
+    _state.show_backfaces = not _state.show_backfaces
+    return _state.show_backfaces
+
+def get_backface_rendering():
+    """Get current backface rendering state"""
+    global _state
+    return _state.show_backfaces
 
 # ===== BBOX CALCULATIONS =====
 
@@ -358,7 +398,7 @@ def calculate_bbox_bounds_optimized(world_coords, cursor_location, cursor_rotati
     _state.coordinate_transform_cache[cache_key] = result
     return result
 
-def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cursor_rotation, marked_points=None):
+def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cursor_rotation, marked_points=None, use_depsgraph=False):
     """Optimized marked faces bbox update with proper cache handling"""
     global _state
     
@@ -370,7 +410,15 @@ def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cur
             if not face_indices or obj.type != 'MESH':
                 continue
 
-            mesh = obj.data
+            if use_depsgraph:
+                try:
+                    eval_obj = obj.evaluated_get(bpy.context.view_layer.depsgraph)
+                    mesh = eval_obj.data
+                except:
+                    mesh = obj.data
+            else:
+                mesh = obj.data
+
             obj_mat = obj.matrix_world
 
             # Batch process face vertices
@@ -439,7 +487,7 @@ def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cur
         _state.current_bbox_data = None
 
 
-def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points=None):
+def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points=None, use_depsgraph=False):
     """Update preview with convex hull of marked faces/points"""
     global _state
     
@@ -451,7 +499,15 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
             if not face_indices or obj.type != 'MESH':
                 continue
 
-            mesh = obj.data
+            if use_depsgraph:
+                try:
+                    eval_obj = obj.evaluated_get(bpy.context.view_layer.depsgraph)
+                    mesh = eval_obj.data
+                except:
+                    mesh = obj.data
+            else:
+                mesh = obj.data
+
             obj_mat = obj.matrix_world
 
             # Batch process face vertices
@@ -531,7 +587,7 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
         print(f"Error updating convex hull preview: {e}")
         _state.current_bbox_data = None
 
-def update_marked_faces_sphere(marked_faces_dict, marked_points=None):
+def update_marked_faces_sphere(marked_faces_dict, marked_points=None, use_depsgraph=False):
     """Update preview with bounding sphere of marked faces/points"""
     global _state
     
@@ -543,7 +599,15 @@ def update_marked_faces_sphere(marked_faces_dict, marked_points=None):
             if not face_indices or obj.type != 'MESH':
                 continue
 
-            mesh = obj.data
+            if use_depsgraph:
+                try:
+                    eval_obj = obj.evaluated_get(bpy.context.view_layer.depsgraph)
+                    mesh = eval_obj.data
+                except:
+                    mesh = obj.data
+            else:
+                mesh = obj.data
+
             obj_mat = obj.matrix_world
 
             # Batch process face vertices
@@ -730,10 +794,29 @@ def update_bbox_preview(target_obj, push_value, cursor_location, cursor_rotation
 
 # ===== BOUNDING BOX CREATION =====
 
-def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, marked_points=None):
+def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, marked_points=None, use_depsgraph=False):
     """Main bounding box creation function - optimized version"""
     context = bpy.context
     cursor = context.scene.cursor
+    # Capture cursor state before any potential mode changes
+    # Capture cursor state before any potential mode changes
+    cursor_location = cursor.location.copy()
+    
+    # Robustly capture rotation as XYZ Euler regardless of mode
+    if cursor.rotation_mode == 'QUATERNION':
+        cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        aa = cursor.rotation_axis_angle
+        # Matrix.Rotation(angle, size, axis)
+        rot_mat = Matrix.Rotation(aa[0], 4, Vector((aa[1], aa[2], aa[3])))
+        cursor_rotation = rot_mat.to_euler('XYZ')
+    else:
+        # Euler modes
+        if cursor.rotation_mode != 'XYZ':
+             cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
+        else:
+             cursor_rotation = cursor.rotation_euler.copy()
+    
     cursor_rotation_mode = context.scene.cursor.rotation_mode
     context.scene.cursor.rotation_mode = 'XYZ'
     
@@ -757,7 +840,14 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
             
             if marked_faces:
                 for obj, face_indices in marked_faces.items():
-                    mesh = obj.data
+                    if use_depsgraph:
+                        try:
+                            eval_obj = obj.evaluated_get(context.view_layer.depsgraph)
+                            mesh = eval_obj.data
+                        except:
+                            mesh = obj.data
+                    else:
+                        mesh = obj.data
                     obj_mat_world = obj.matrix_world
                     
                     for face_idx in face_indices:
@@ -777,7 +867,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
             
             # Use optimized calculation
             local_center, dimensions, cursor_rot_mat = calculate_bbox_bounds_optimized(
-                all_world_coords, cursor.location, cursor.rotation_euler
+                all_world_coords, cursor_location, cursor_rotation
             )
             
             # Apply push value
@@ -798,7 +888,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                 max(dimensions.z, epsilon)
             ))
             
-            world_center = cursor.matrix @ local_center
+            world_center = cursor_location + (cursor_rot_mat @ local_center)
             
             # Create bbox object
             original_selected = list(context.selected_objects)
@@ -811,7 +901,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                 enter_editmode=False,
                 align='WORLD',
                 location=world_center,
-                rotation=cursor.rotation_euler
+                rotation=cursor_rotation
             )
             
             bbox_obj = context.active_object
@@ -880,7 +970,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
 
                     # Use optimized calculation
                     local_center, dimensions, cursor_rot_mat = calculate_bbox_bounds_optimized(
-                        world_coords, cursor.location, cursor.rotation_euler
+                        world_coords, cursor_location, cursor_rotation
                     )
 
                     # Apply push value
@@ -901,7 +991,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                         max(dimensions.z, epsilon)
                     ))
 
-                    world_center = cursor.matrix @ local_center
+                    world_center = cursor_location + (cursor_rot_mat @ local_center)
 
                     bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
                     bpy.ops.object.mode_set(mode='OBJECT')
@@ -911,7 +1001,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                         enter_editmode=False,
                         align='WORLD',
                         location=world_center,
-                        rotation=cursor.rotation_euler
+                        rotation=cursor_rotation
                     )
 
                     bbox_obj = context.active_object
@@ -955,7 +1045,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
 
                     # Use optimized calculation
                     local_center, dimensions, cursor_rot_mat = calculate_bbox_bounds_optimized(
-                        all_world_coords, cursor.location, cursor.rotation_euler
+                        all_world_coords, cursor_location, cursor_rotation
                     )
 
                     # Apply push value with safety checks
@@ -980,7 +1070,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                         max(dimensions.z, epsilon)
                     ))
 
-                    world_center = cursor.matrix @ local_center
+                    world_center = cursor_location + (cursor_rot_mat @ local_center)
 
                     bpy.ops.object.select_all(action='DESELECT')
 
@@ -989,7 +1079,7 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                         enter_editmode=False,
                         align='WORLD',
                         location=world_center,
-                        rotation=cursor.rotation_euler
+                        rotation=cursor_rotation
                     )
 
                     bbox_obj = context.active_object

@@ -87,7 +87,7 @@ def get_context_hash():
 
 # ===== OPTIMIZED RAYCAST FUNCTIONS =====
 
-def get_face_edges_from_raycast_optimized(context, event):
+def get_face_edges_from_raycast_optimized(context, event, use_depsgraph=False):
     """Optimized raycast with caching and early exits"""
     mouse_x = event.mouse_region_x
     mouse_y = event.mouse_region_y
@@ -156,7 +156,8 @@ def get_face_edges_from_raycast_optimized(context, event):
     
     # Process result
     if closest_result:
-        result = _process_raycast_result(*closest_result)
+        # Pass use_depsgraph to process function
+        result = _process_raycast_result(*closest_result, use_depsgraph=use_depsgraph)
     else:
         result = None
     
@@ -197,12 +198,20 @@ def _point_in_object_bounds(ray_origin, ray_direction, obj, margin=0.1):
     except:
         return True  # If bounds check fails, assume hit is possible
 
-def _process_raycast_result(hit, location, normal, face_index, obj, matrix):
+def _process_raycast_result(hit, location, normal, face_index, obj, matrix, use_depsgraph=False):
     """Process raycast result into face data structure"""
     if not hit or not obj or obj.type != 'MESH':
         return None
     
-    mesh = obj.data
+    if use_depsgraph:
+        try:
+            depsgraph = bpy.context.view_layer.depsgraph
+            obj_eval = obj.evaluated_get(depsgraph)
+            mesh = obj_eval.data
+        except:
+             mesh = obj.data
+    else:
+        mesh = obj.data
     
     # Bounds check
     if face_index >= len(mesh.polygons):
@@ -244,12 +253,12 @@ def _process_raycast_result(hit, location, normal, face_index, obj, matrix):
 
 # ===== OPTIMIZED CURSOR PLACEMENT =====
 
-def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=True, edge_index=0, preview=True):
+def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=True, edge_index=0, preview=True, use_depsgraph=False):
     """Optimized cursor placement with caching"""
     from .core import update_edge_highlight, update_bbox_preview
     from ..settings.preferences import get_preferences
     
-    face_data = get_face_edges_from_raycast_optimized(context, event)
+    face_data = get_face_edges_from_raycast_optimized(context, event, use_depsgraph=use_depsgraph)
     
     if not face_data:
         return {
@@ -283,7 +292,17 @@ def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=T
             y_axis = -y_axis
         
         rotation_matrix = Matrix((x_axis, y_axis, z_axis)).transposed()
-        cursor.rotation_euler = rotation_matrix.to_euler()
+        
+        # Apply rotation based on cursor rotation mode
+        if cursor.rotation_mode == 'QUATERNION':
+            cursor.rotation_quaternion = rotation_matrix.to_quaternion()
+        elif cursor.rotation_mode == 'AXIS_ANGLE':
+            q = rotation_matrix.to_quaternion()
+            axis, angle = q.to_axis_angle()
+            cursor.rotation_axis_angle = [angle, axis.x, axis.y, axis.z]
+        else:
+            # Handle all Euler modes (XYZ, ZYX, etc.)
+            cursor.rotation_euler = rotation_matrix.to_euler(cursor.rotation_mode)
         
         # Update highlights
         update_edge_highlight([selected_edge['start'], selected_edge['end']])
@@ -483,17 +502,17 @@ def get_performance_stats():
 
 # ===== LEGACY COMPATIBILITY FUNCTIONS =====
 
-def get_face_edges_from_raycast(context, event):
+def get_face_edges_from_raycast(context, event, use_depsgraph=False):
     """Legacy function name - redirects to optimized version"""
-    return get_face_edges_from_raycast_optimized(context, event)
+    return get_face_edges_from_raycast_optimized(context, event, use_depsgraph=use_depsgraph)
 
 def select_edge_by_scroll(face_data, scroll_direction, current_edge_index):
     """Legacy function name - redirects to optimized version"""
     return select_edge_by_scroll_optimized(face_data, scroll_direction, current_edge_index)
 
-def place_cursor_with_raycast_and_edge(context, event, align_to_face=True, edge_index=0, preview=True):
+def place_cursor_with_raycast_and_edge(context, event, align_to_face=True, edge_index=0, preview=True, use_depsgraph=False):
     """Legacy function name - redirects to optimized version"""
-    return place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face, edge_index, preview)
+    return place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face, edge_index, preview, use_depsgraph=use_depsgraph)
 
 def snap_cursor_to_closest_element(context, event, face_data=None):
     """Legacy function name - redirects to optimized version"""
@@ -1061,12 +1080,21 @@ def force_enable_point_drawing():
 
 # ===== COPLANAR SELECTION UTILITIES =====
 
-def get_connected_coplanar_faces(obj, start_face_index, angle_tolerance_radians):
+def get_connected_coplanar_faces(obj, start_face_index, angle_tolerance_radians, use_depsgraph=False):
     """Find connected faces that are coplanar within tolerance"""
     if obj.type != 'MESH':
         return set()
     
-    mesh = obj.data
+    if use_depsgraph:
+        try:
+            depsgraph = bpy.context.view_layer.depsgraph
+            obj_eval = obj.evaluated_get(depsgraph)
+            mesh = obj_eval.data
+        except:
+             mesh = obj.data
+    else:
+        mesh = obj.data
+
     if start_face_index >= len(mesh.polygons):
         return set()
 
