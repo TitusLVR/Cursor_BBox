@@ -239,9 +239,9 @@ def draw_preview_faces(gpu_manager, preview_faces_visual_cache, show_backfaces=F
     gpu.state.blend_set('NONE')
     gpu.state.depth_test_set('LESS_EQUAL')
     gpu.state.face_culling_set('NONE')
-def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points, show_backfaces=False):
+def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points, show_backfaces=False, preview_point=None):
     """Optimized face marking with batch caching - draws on top"""
-    if not marked_faces_visual_cache and not marked_points:
+    if not marked_faces_visual_cache and not marked_points and not preview_point:
         return
     
     # Get color from preferences
@@ -284,12 +284,17 @@ def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points, sho
     # Draw marked points as dots only
     if marked_points:
         draw_marked_points(gpu_manager, marked_points, face_color)
+        
+    # Draw preview point if exists (e.g. green)
+    if preview_point:
+        preview_color = (0.0, 1.0, 0.0, 1.0)
+        draw_marked_points(gpu_manager, [preview_point], preview_color)
     
     # Reset GPU state
     gpu.state.blend_set('NONE')
     gpu.state.depth_test_set('LESS_EQUAL')
 
-def draw_bbox_preview(gpu_manager, current_bbox_data):
+def draw_bbox_preview(gpu_manager, current_bbox_data, use_culling=False):
     """Optimized bbox preview with batch caching - draws behind marked faces"""
     if not current_bbox_data:
         return
@@ -317,6 +322,12 @@ def draw_bbox_preview(gpu_manager, current_bbox_data):
     gpu.state.blend_set('ALPHA')
     gpu.state.depth_test_set('LESS_EQUAL')  # Normal depth testing
     
+    # Handle backface culling
+    if use_culling:
+        gpu.state.face_culling_set('BACK')
+    else:
+        gpu.state.face_culling_set('NONE')
+    
     shader = gpu_manager.get_shader('UNIFORM_COLOR')
     
     # Draw faces if enabled (behind everything)
@@ -341,6 +352,7 @@ def draw_bbox_preview(gpu_manager, current_bbox_data):
     # Reset GPU state
     gpu.state.blend_set('NONE')
     gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.face_culling_set('NONE')
     gpu.state.line_width_set(1.0)
 
 # ===== HANDLER WRAPPER FUNCTIONS =====
@@ -357,13 +369,13 @@ def create_face_marking_handler(state):
         # Draw preview first (so marked faces draw on top if they overlap)
         if hasattr(state, 'preview_faces_visual_cache'):
              draw_preview_faces(state.gpu_manager, state.preview_faces_visual_cache, show_backfaces=getattr(state, 'show_backfaces', False))
-        draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points, show_backfaces=getattr(state, 'show_backfaces', False))
+        draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points, show_backfaces=getattr(state, 'show_backfaces', False), preview_point=getattr(state, 'preview_point', None))
     return draw_marked_faces_wrapper
 
 def create_bbox_preview_handler(state):
     """Create bbox preview drawing handler"""
     def draw_bbox_preview_wrapper():
-        draw_bbox_preview(state.gpu_manager, state.current_bbox_data)
+        draw_bbox_preview(state.gpu_manager, state.current_bbox_data, use_culling=getattr(state, 'preview_culling', False))
     return draw_bbox_preview_wrapper
 
 # ===== HANDLER MANAGEMENT =====
@@ -423,6 +435,23 @@ def ensure_handlers_enabled(state):
     # Check if we need bbox preview
     if (state.current_bbox_data or state.marked_faces or state.marked_points) and 'bbox_preview' not in state.handlers:
         enable_bbox_preview(state)
+        
+    if getattr(state, 'limitation_plane_matrix', None) and 'limitation_plane' not in state.handlers:
+        enable_limitation_plane(state)
+
+def enable_limitation_plane(state):
+    """Enable limitation plane drawing"""
+    if 'limitation_plane' not in state.handlers:
+        handler = create_limitation_plane_handler(state)
+        state.handlers['limitation_plane'] = bpy.types.SpaceView3D.draw_handler_add(
+            handler, (), 'WINDOW', 'POST_VIEW'
+        )
+
+def disable_limitation_plane(state):
+    """Disable limitation plane drawing"""
+    if 'limitation_plane' in state.handlers:
+        bpy.types.SpaceView3D.draw_handler_remove(state.handlers['limitation_plane'], 'WINDOW')
+        del state.handlers['limitation_plane']
 
 def refresh_all_handlers(state):
     """Refresh all handlers - useful for recovery from errors"""
@@ -433,6 +462,63 @@ def refresh_all_handlers(state):
     if state.current_edge_data:
         enable_edge_highlight(state)
     
+    ensure_handlers_enabled(state)
+
+def draw_limitation_plane(gpu_manager, matrix):
+    """Draw limitation plane grid"""
+    if not matrix:
+        return
+        
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('LESS_EQUAL')
+    
+    # Plane color (transparent blue-ish)
+    color = (0.2, 0.6, 1.0, 0.15)
+    grid_color = (0.3, 0.7, 1.0, 0.4)
+    
+    shader = gpu_manager.get_shader('UNIFORM_COLOR')
+    
+    # Draw Grid/Plane
+    size = 10.0
+    steps = 10
+    
+    lines = []
+    
+    def t(x, y):
+        return matrix @ Vector((x, y, 0))
+    
+    for i in range(-steps, steps + 1):
+        d = (i / steps) * size
+        lines.append(t(-size, d))
+        lines.append(t(size, d))
+        lines.append(t(d, -size))
+        lines.append(t(d, size))
+        
+    gpu.state.line_width_set(1.0)
+    shader.uniform_float("color", grid_color)
+    batch = batch_for_shader(shader, 'LINES', {"pos": lines})
+    batch.draw(shader)
+    
+    # Draw Quad
+    tris = [
+        t(-size, -size), t(size, -size), t(-size, size),
+        t(-size, size), t(size, -size), t(size, size)
+    ]
+    
+    shader.uniform_float("color", color)
+    gpu.state.face_culling_set('NONE')
+    batch_quad = batch_for_shader(shader, 'TRIS', {"pos": tris})
+    batch_quad.draw(shader)
+    
+    gpu.state.blend_set('NONE')
+    gpu.state.line_width_set(1.0)
+    gpu.state.face_culling_set('BACK')
+
+def create_limitation_plane_handler(state):
+    """Create handler for limitation plane"""
+    def draw_limitation_plane_wrapper():
+        draw_limitation_plane(state.gpu_manager, getattr(state, 'limitation_plane_matrix', None))
+    return draw_limitation_plane_wrapper
     if state.current_bbox_data or state.marked_faces or state.marked_points:
         enable_bbox_preview(state)
         

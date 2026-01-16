@@ -329,13 +329,22 @@ def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=T
 # ===== OPTIMIZED SNAP FUNCTIONS =====
 
 @lru_cache(maxsize=16)
-def get_snap_elements_cached(obj_name, face_index):
+def get_snap_elements_cached(obj_name, face_index, use_depsgraph=False):
     """Cache snap elements for a specific face"""
     obj = bpy.data.objects.get(obj_name)
     if not obj or obj.type != 'MESH':
         return []
     
-    mesh = obj.data
+    if use_depsgraph:
+        try:
+            depsgraph = bpy.context.view_layer.depsgraph
+            obj_eval = obj.evaluated_get(depsgraph)
+            mesh = obj_eval.data
+        except:
+            mesh = obj.data
+    else:
+        mesh = obj.data
+    
     if face_index >= len(mesh.polygons):
         return []
     
@@ -368,7 +377,7 @@ def get_snap_elements_cached(obj_name, face_index):
     
     return elements
 
-def snap_cursor_to_closest_element_optimized(context, event, face_data=None):
+def snap_cursor_to_closest_element_optimized(context, event, face_data=None, threshold=120, intersection_points=None, use_depsgraph=False):
     """Optimized cursor snapping with caching"""
     region = context.region
     region_3d = context.region_data
@@ -380,9 +389,20 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None):
     closest_distance = float('inf')
     closest_type = None
     
+    # Check intersection points first if provided
+    if intersection_points:
+        for p in intersection_points:
+            screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, p)
+            if screen_pos:
+                screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
+                if screen_distance < closest_distance:
+                    closest_distance = screen_distance
+                    closest_point = p
+                    closest_type = 'intersection'
+    
     if face_data:
         # Use cached snap elements for the specific face
-        elements = get_snap_elements_cached(face_data['object'].name, face_data['face_index'])
+        elements = get_snap_elements_cached(face_data['object'].name, face_data['face_index'], use_depsgraph=use_depsgraph)
         
         for element_type, world_pos in elements:
             screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
@@ -403,11 +423,16 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None):
         depsgraph = context.view_layer.depsgraph
         
         for obj in selected_objects:
-            obj_eval = obj.evaluated_get(depsgraph)
-            if not obj_eval.data:
-                continue
+            if use_depsgraph:
+                obj_eval = obj.evaluated_get(depsgraph)
+                if not obj_eval.data:
+                    continue
+                mesh = obj_eval.data
+            else:
+                mesh = obj.data
+                if not mesh:
+                    continue
             
-            mesh = obj_eval.data
             matrix_world = obj.matrix_world
             
             # Check vertices (sample only if many vertices)
@@ -456,7 +481,7 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None):
                         closest_type = 'face'
     
     # Snap threshold check
-    if closest_point and closest_distance < 50:  # 50 pixel threshold
+    if closest_point and closest_distance < threshold:
         context.scene.cursor.location = closest_point
         return {
             'success': True,
@@ -514,9 +539,9 @@ def place_cursor_with_raycast_and_edge(context, event, align_to_face=True, edge_
     """Legacy function name - redirects to optimized version"""
     return place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face, edge_index, preview, use_depsgraph=use_depsgraph)
 
-def snap_cursor_to_closest_element(context, event, face_data=None):
+def snap_cursor_to_closest_element(context, event, face_data=None, threshold=120, intersection_points=None, use_depsgraph=False):
     """Legacy function name - redirects to optimized version"""
-    return snap_cursor_to_closest_element_optimized(context, event, face_data)
+    return snap_cursor_to_closest_element_optimized(context, event, face_data, threshold=threshold, intersection_points=intersection_points, use_depsgraph=use_depsgraph)
 
 # ===== BATCH PROCESSING UTILITIES =====
 
@@ -798,6 +823,59 @@ _profiler = PerformanceProfiler()
 def get_profiling_stats():
     """Get current profiling statistics"""
     return _profiler.get_stats()
+
+# ===== GEOMETRY UTILS =====
+
+def project_point_to_plane_intersection(hit_location, face_normal, plane_origin, plane_normal):
+    """
+    Project a point (hit_location on Face Plane) onto the line of intersection 
+    between Face Plane and Cursor Plane (plane_origin, plane_normal).
+    
+    Returns:
+        Vector: The projected point on the intersection line, or None if planes are parallel.
+    """
+    # Plane 1: Face Plane (P - hit_location) . face_normal = 0
+    # Plane 2: Cursor Plane (P - plane_origin) . plane_normal = 0
+    
+    # Direction of intersection line L
+    line_dir = face_normal.cross(plane_normal)
+    
+    # If cross product is near zero, planes are parallel
+    if line_dir.length_squared < 1e-6:
+        return None
+        
+    line_dir.normalize()
+    
+    # finding a point on the line (intersection of planes)
+    # We have a system of linear equations for P(x,y,z):
+    # N1 . P = d1  => face_normal . P = face_normal . hit_location
+    # N2 . P = d2  => plane_normal . P = plane_normal . plane_origin
+    
+    # Let's find a point P0 on this line.
+    # We can solve this using cross products or general linear system solver.
+    # A robust way:
+    # L = N1 x N2
+    # P0 = (d1 * (N2 x L) + d2 * (L x N1)) / |L|^2
+    # from http://geomalgorithms.com/a05-_intersect-1.html
+    
+    d1 = face_normal.dot(hit_location)
+    d2 = plane_normal.dot(plane_origin)
+    L_sq = line_dir.length_squared # Already normalized so 1.0, but for safety
+    if L_sq < 1e-6: return None
+    
+    n2_cross_l = plane_normal.cross(line_dir)
+    l_cross_n1 = line_dir.cross(face_normal)
+    
+    p0 = (d1 * n2_cross_l + d2 * l_cross_n1) / line_dir.length_squared
+    
+    # Now we have the line: P(t) = P0 + t * line_dir
+    # We want to project hit_location onto this line.
+    # P_proj = P0 + dot(hit_location - P0, line_dir) * line_dir
+    
+    t = (hit_location - p0).dot(line_dir)
+    p_proj = p0 + t * line_dir
+    
+    return p_proj
 
 def clear_profiling_data():
     """Clear all profiling data"""
@@ -1194,3 +1272,198 @@ def assign_object_styles(context, obj):
         obj.color = color
     except Exception as e:
         print(f"Failed to assign object color: {e}")
+
+def calculate_plane_edge_intersections(obj, plane_origin, plane_normal, use_depsgraph=False):
+    """
+    Calculate intersection points between object edges and a plane.
+    Returns a list of world-space intersection points.
+    """
+    if not obj or obj.type != 'MESH':
+        return []
+    
+    if use_depsgraph:
+        try:
+            depsgraph = bpy.context.view_layer.depsgraph
+            obj_eval = obj.evaluated_get(depsgraph)
+            mesh = obj_eval.data
+        except:
+            mesh = obj.data
+    else:
+        mesh = obj.data
+    
+    matrix = obj.matrix_world
+    
+    # Plane equation: (P - P0) . N = 0  => P . N = P0 . N = d
+    d = plane_origin.dot(plane_normal)
+    
+    intersections = []
+    
+    for edge in mesh.edges:
+        v1_local = mesh.vertices[edge.vertices[0]].co
+        v2_local = mesh.vertices[edge.vertices[1]].co
+        
+        v1_world = matrix @ v1_local
+        v2_world = matrix @ v2_local
+        
+        # Check intersection
+        # t = (d - v1.N) / ((v2 - v1).N)
+        
+        vec = v2_world - v1_world
+        denom = vec.dot(plane_normal)
+        
+        if abs(denom) > 1e-6: # Not parallel
+            val1 = v1_world.dot(plane_normal)
+            t = (d - val1) / denom
+            if 0.0 <= t <= 1.0: # segment intersection
+                p = v1_world + vec * t
+                intersections.append(p)
+                
+    return intersections
+
+# ===== OPERATOR UTILITY FUNCTIONS =====
+
+def get_cursor_rotation_euler(context):
+    """
+    Extract cursor rotation as Euler XYZ, handling all rotation modes.
+    
+    Args:
+        context: Blender context
+        
+    Returns:
+        mathutils.Euler: Cursor rotation as Euler XYZ
+    """
+    cursor = context.scene.cursor
+    
+    if cursor.rotation_mode == 'QUATERNION':
+        return cursor.rotation_quaternion.to_euler('XYZ')
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        rot_mat = cursor.matrix.to_3x3()
+        return rot_mat.to_euler('XYZ')
+    else:
+        if cursor.rotation_mode != 'XYZ':
+            return cursor.rotation_euler.to_matrix().to_euler('XYZ')
+        else:
+            return cursor.rotation_euler
+
+def get_selected_faces_from_edit_mode(context):
+    """
+    Get selected faces from objects in edit mode.
+    
+    Args:
+        context: Blender context
+        
+    Returns:
+        dict: Dictionary mapping objects to sets of selected face indices
+    """
+    import bmesh
+    
+    marked_faces = {}
+    
+    objects_in_edit = [o for o in context.selected_objects if o.type == 'MESH' and o.mode == 'EDIT']
+    if context.active_object and context.active_object.mode == 'EDIT' and context.active_object not in objects_in_edit:
+        objects_in_edit.append(context.active_object)
+    
+    for obj in objects_in_edit:
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+        selected_indices = {f.index for f in bm.faces if f.select}
+        if selected_indices:
+            marked_faces[obj] = selected_indices
+    
+    return marked_faces
+
+def calculate_point_location(context, event, face_data, snap_enabled, limit_plane_mode, 
+                            limitation_plane_matrix, cached_limit_intersections, 
+                            snap_threshold, use_depsgraph=False):
+    """
+    Calculate point location for point mode, handling snap and limit plane logic.
+    
+    Args:
+        context: Blender context
+        event: Blender event
+        face_data: Face data from raycast
+        snap_enabled: Whether snapping is enabled
+        limit_plane_mode: Whether limit plane mode is active
+        limitation_plane_matrix: Matrix of the limitation plane
+        cached_limit_intersections: Cached intersection points
+        snap_threshold: Snap threshold in pixels
+        use_depsgraph: Whether to use depsgraph
+        
+    Returns:
+        tuple: (location, success_message) or (None, None) if failed
+    """
+    loc = None
+    message = None
+    
+    if snap_enabled:
+        # First update cursor position for proper snapping
+        if face_data:
+            # Place cursor at hit location first
+            place_cursor_with_raycast_and_edge(
+                context, event, True, 0, preview=False, use_depsgraph=use_depsgraph
+            )
+        
+        # Snap Logic - use intersection points if limit plane mode is enabled
+        intersection_pts = cached_limit_intersections if limit_plane_mode else None
+        snap_result = snap_cursor_to_closest_element(
+            context, event, face_data, threshold=snap_threshold, 
+            intersection_points=intersection_pts, use_depsgraph=use_depsgraph
+        )
+        if snap_result['success']:
+            loc = context.scene.cursor.location.copy()
+            message = f"Added point snapped to {snap_result['type']}"
+        elif face_data:
+            try:
+                loc = face_data['hit_location']
+            except:
+                pass
+        else:
+            loc = context.scene.cursor.location.copy()
+    elif limit_plane_mode and limitation_plane_matrix and face_data:
+        # Limit Plane Logic (no snap)
+        plane_origin = limitation_plane_matrix.to_translation()
+        plane_normal = limitation_plane_matrix.col[2].to_3d()
+        proj_pt = project_point_to_plane_intersection(
+            face_data['hit_location'], 
+            face_data['face_normal'],
+            plane_origin, 
+            plane_normal
+        )
+        if proj_pt:
+            loc = proj_pt
+        else:
+            return None, "Cannot place point: intersection fail"
+    else:
+        # No snap, use raycast location
+        if face_data:
+            try:
+                loc = face_data['hit_location']
+            except:
+                # Fallback to cursor location
+                loc = context.scene.cursor.location.copy()
+        else:
+            loc = context.scene.cursor.location.copy()
+    
+    return loc, message
+
+def get_faces_to_process(obj, face_idx, use_coplanar, coplanar_angle_rad, use_depsgraph=False):
+    """
+    Get faces to process based on coplanar selection settings.
+    
+    Args:
+        obj: Object containing the face
+        face_idx: Starting face index
+        use_coplanar: Whether to use coplanar selection
+        coplanar_angle_rad: Coplanar angle tolerance in radians
+        use_depsgraph: Whether to use depsgraph
+        
+    Returns:
+        set: Set of face indices to process
+    """
+    if use_coplanar:
+        coplanar_indices = get_connected_coplanar_faces(
+            obj, face_idx, coplanar_angle_rad, use_depsgraph=use_depsgraph
+        )
+        return coplanar_indices if coplanar_indices else {face_idx}
+    else:
+        return {face_idx}

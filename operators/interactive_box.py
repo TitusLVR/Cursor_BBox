@@ -1,7 +1,22 @@
 import bpy
-import bmesh
+import mathutils
 from math import radians, degrees
-from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, get_connected_coplanar_faces
+from ..functions.utils import (
+    get_face_edges_from_raycast,
+    select_edge_by_scroll,
+    place_cursor_with_raycast_and_edge,
+    snap_cursor_to_closest_element,
+    get_connected_coplanar_faces,
+    project_point_to_plane_intersection,
+    calculate_plane_edge_intersections,
+    ensure_cbb_collection,
+    ensure_cbb_material,
+    assign_object_styles,
+    get_cursor_rotation_euler,
+    get_selected_faces_from_edit_mode,
+    calculate_point_location,
+    get_faces_to_process
+)
 from ..functions.core import (
     cursor_aligned_bounding_box,
     enable_edge_highlight_wrapper as enable_edge_highlight,
@@ -16,13 +31,20 @@ from ..functions.core import (
     update_marked_faces_bbox,
     rebuild_marked_faces_visual_data,
     add_marked_point,
-    add_marked_point,
     clear_marked_points,
     clear_all_markings,
     update_preview_faces,
     clear_preview_faces,
     toggle_backface_rendering,
-    get_backface_rendering
+    get_backface_rendering,
+    toggle_preview_culling,
+    get_preview_culling,
+    update_preview_point,
+    clear_preview_point,
+    update_limitation_plane,
+    clear_limitation_plane,
+    enable_limitation_plane_wrapper as enable_limitation_plane,
+    disable_limitation_plane_wrapper as disable_limitation_plane
 )
 
 class CursorBBox_OT_interactive_box(bpy.types.Operator):
@@ -47,12 +69,25 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         default=True
     )
     
+    snap_threshold: bpy.props.IntProperty(
+        name="Snap Threshold",
+        default=120,
+        min=1,
+        max=500,
+        description="Distance in pixels to snap to elements"
+    )
+    
     current_edge_index: bpy.props.IntProperty(default=0)
     current_face_data = None
     marked_faces = {}  # Dictionary to store marked faces per object
     marked_points = []  # List to store additional point markers
     original_selected_objects = set()
     use_depsgraph = False
+    
+    # Limitation Plane State
+    limit_plane_mode = False
+    limitation_plane_matrix = None
+    cached_limit_intersections = []
     
     def modal(self, context, event):
         # Update status bar with modal controls
@@ -70,10 +105,19 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         deps_state = "ON" if self.use_depsgraph else "OFF"
         coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
         backface_state = "ON" if get_backface_rendering() else "OFF"
-        context.area.header_text_set(
-            f"Space: Create BBox{marking_status} | LMB: Mark/Place | D: Depsgraph ({deps_state}) | P: Backfaces ({backface_state}) | Scroll: Edge | Shift+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | 1-7: Angle Presets | "
-            f"C: Coplanar ({coplanar_state}) | F: Mark | A: Add Point | S: Snap | Z: Clear | RMB/ESC: Cancel"
-        )
+        preview_cull_state = "ON" if get_preview_culling() else "OFF"
+        
+        if self.point_mode:
+            snap_state = "ON" if self.snap_enabled else "OFF"
+            limit_state = "ON" if self.limit_plane_mode else "OFF"
+            context.area.header_text_set(
+                f"-- POINT MODE -- | LMB: Add Point | S: Snap ({snap_state}) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | C: Limit Plane ({limit_state}) | A: Exit Mode | ESC: Cancel"
+            )
+        else:
+            context.area.header_text_set(
+                f"Space: Create BBox{marking_status} | LMB: Mark/Place | D: Depsgraph ({deps_state}) | P: Backfaces ({backface_state}) | O: Preview Cull ({preview_cull_state}) | Alt+Scroll: Edge | Shift+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | 1-7: Angle Presets | "
+                f"C: Coplanar ({coplanar_state}) | F: Mark | A: Add Point Mode | S: Snap | Z: Clear | RMB/ESC: Cancel"
+            )
         
 
         # Cancel (Esc)
@@ -83,6 +127,12 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             disable_face_marking()
             clear_all_markings()
             clear_preview_faces()
+            disable_face_marking()
+            clear_all_markings()
+            clear_preview_faces()
+            clear_preview_point()
+            clear_limitation_plane()
+            disable_limitation_plane(context) # Ensure visual is off
             context.area.header_text_set(None)
             return {'CANCELLED'}
 
@@ -93,13 +143,17 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             disable_face_marking()
             clear_all_markings()
             clear_preview_faces()
+            clear_preview_point()
+            clear_limitation_plane()
+            disable_limitation_plane(context) # Ensure visual is off
             context.area.header_text_set(None)
             return {'FINISHED'}
 
-        # Coplanar Angle Adjustment (Shift + Scroll)
-        if event.shift and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+        # Coplanar Angle Adjustment (Shift + Scroll, with optional Alt for fine tuning if needed, but original was just Shift)
+        # Avoiding Ctrl here since it's now for Snap
+        if event.shift and not event.ctrl and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
             current_deg = degrees(context.scene.cursor_bbox_coplanar_angle)
-            step = 1 if event.ctrl else 5
+            step = 1 if event.alt else 5
             
             if event.type == 'WHEELUPMOUSE':
                 new_angle_deg = current_deg + step
@@ -113,6 +167,37 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
+        # Snap Threshold Adjustment (Ctrl + Scroll)
+        if event.ctrl and not event.shift and not event.alt:
+            if event.type == 'WHEELUPMOUSE':
+                self.snap_threshold += 10
+                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
+                context.area.tag_redraw()
+            elif event.type == 'WHEELDOWNMOUSE':
+                self.snap_threshold = max(10, self.snap_threshold - 10)
+                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
+                context.area.tag_redraw()
+            
+            # Force update header immediately
+            if self.point_mode:
+                snap_state = "ON" if self.snap_enabled else "OFF"
+                limit_state = "ON" if self.limit_plane_mode else "OFF"
+                context.area.header_text_set(
+                    f"-- POINT MODE -- | LMB: Add Point | S: Snap ({snap_state}) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | C: Limit Plane ({limit_state}) | A: Exit Mode | ESC: Cancel"
+                )
+            else:
+                marking_status = f" ({len(self.marked_faces)} objects marked)" if self.marked_faces else ""
+                coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
+                backface_state = "ON" if context.scene.cursor_bbox_backface_rendering else "OFF"
+                deps_state = "ON" if self.use_depsgraph else "OFF"
+                preview_cull_state = "ON" if context.scene.cursor_bbox_preview_culling else "OFF"
+                
+                context.area.header_text_set(
+                 f"Space: Create BBox{marking_status} | LMB: Mark/Place | D: Depsgraph ({deps_state}) | P: Backfaces ({backface_state}) | O: Preview Cull ({preview_cull_state}) | Alt+Scroll: Edge | Shift+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | 1-7: Angle Presets | "
+                 f"C: Coplanar ({coplanar_state}) | F: Mark | A: Add Point Mode | S: Snap | Z: Clear | RMB/ESC: Cancel"
+                )
+            return {'RUNNING_MODAL'}
+        
         # Toggle Depsgraph (D)
         if event.type == 'D' and event.value == 'PRESS':
             self.use_depsgraph = not self.use_depsgraph
@@ -122,22 +207,8 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 rebuild_marked_faces_visual_data(obj, faces, use_depsgraph=self.use_depsgraph)
             
             # Update bbox preview if we have markings
-            # Update bbox preview if we have markings
             if self.marked_faces or self.marked_points:
-                 # Robustly capture rotation
-                 cursor = context.scene.cursor
-                 if cursor.rotation_mode == 'QUATERNION':
-                     cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                 elif cursor.rotation_mode == 'AXIS_ANGLE':
-                     # Axis angle to euler via matrix or quaternion
-                     rot_mat = cursor.matrix.to_3x3() # Easiest way if matrix is up to date
-                     cursor_rotation = rot_mat.to_euler('XYZ')
-                 else:
-                     if cursor.rotation_mode != 'XYZ':
-                         cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                     else:
-                         cursor_rotation = cursor.rotation_euler
-
+                 cursor_rotation = get_cursor_rotation_euler(context)
                  update_marked_faces_bbox(self.marked_faces, self.push_value, 
                                         context.scene.cursor.location, 
                                         cursor_rotation,
@@ -155,6 +226,14 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
              context.area.tag_redraw()
              return {'RUNNING_MODAL'}
              
+        # Toggle Preview Culling (O)
+        elif event.type == 'O' and event.value == 'PRESS':
+             new_state = toggle_preview_culling()
+             state_str = "ON" if new_state else "OFF"
+             self.report({'INFO'}, f"Preview Culling: {state_str}")
+             context.area.tag_redraw()
+             return {'RUNNING_MODAL'}
+
         # Coplanar Angle Presets (1-7)
         elif event.type in {'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN'} and event.value == 'PRESS':
              angle_map = {
@@ -172,18 +251,46 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
              context.area.tag_redraw()
              return {'RUNNING_MODAL'}
 
-        # Toggle Coplanar (C)
+        # Toggle Coplanar (C) or Limit Plane (C in point mode)
         if event.type == 'C' and event.value == 'PRESS':
-            context.scene.cursor_bbox_select_coplanar = not context.scene.cursor_bbox_select_coplanar
-            state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
-            self.report({'INFO'}, f"Coplanar Selection: {state}")
+            if self.point_mode:
+                self.limit_plane_mode = not self.limit_plane_mode
+                if self.limit_plane_mode:
+                    # Set the limitation plane to the current cursor orientation
+                    self.limitation_plane_matrix = context.scene.cursor.matrix.copy()
+                    enable_limitation_plane(context, self.limitation_plane_matrix)
+                    
+                    # Calculate and cache edge intersections for snapping
+                    self.cached_limit_intersections = []
+                    # Use active object or all marked objects? Let's use active object if it's mesh
+                    if context.active_object and context.active_object.type == 'MESH':
+                        origin = self.limitation_plane_matrix.to_translation()
+                        normal = self.limitation_plane_matrix.col[2][:3] # Z axis
+                        self.cached_limit_intersections = calculate_plane_edge_intersections(
+                            context.active_object, 
+                            mathutils.Vector(origin), 
+                            mathutils.Vector(normal),
+                            use_depsgraph=self.use_depsgraph
+                        )
+                        self.report({'INFO'}, f"Limitation Plane ON | Found {len(self.cached_limit_intersections)} intersection points")
+                    else:
+                        self.report({'INFO'}, "Limitation Plane ON (No active mesh object for intersections)")
+                else:
+                    clear_limitation_plane()
+                    disable_limitation_plane(context)
+                    self.cached_limit_intersections = []
+                    self.report({'INFO'}, "Limitation Plane OFF")
+            else:
+                context.scene.cursor_bbox_select_coplanar = not context.scene.cursor_bbox_select_coplanar
+                state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
+                self.report({'INFO'}, f"Coplanar Selection: {state}")
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE'}:
             return {'PASS_THROUGH'}
-        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and (event.ctrl or event.shift):
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not event.shift and not event.alt and not event.ctrl:
             return {'PASS_THROUGH'}
         
         # Create BBox (Space/Enter)
@@ -217,6 +324,38 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         
         # Mark Face (LMB)
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            if self.point_mode:
+                # Add Point Logic
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                
+                loc, message = calculate_point_location(
+                    context, event, face_data, self.snap_enabled, 
+                    self.limit_plane_mode, self.limitation_plane_matrix,
+                    self.cached_limit_intersections, self.snap_threshold,
+                    use_depsgraph=self.use_depsgraph
+                )
+                
+                if loc is None:
+                    if message:
+                        self.report({'WARNING'}, message)
+                    return {'RUNNING_MODAL'}
+                
+                if message:
+                    self.report({'INFO'}, message)
+                
+                self.marked_points.append(loc)
+                add_marked_point(loc)
+                
+                # Update bbox preview based on marked faces and points
+                cursor_rotation = get_cursor_rotation_euler(context)
+                update_marked_faces_bbox(self.marked_faces, self.push_value, 
+                                       context.scene.cursor.location, 
+                                       cursor_rotation,
+                                       marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            
+            # Normal Mark/Place Logic
             # Mark/unmark face under cursor
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
@@ -231,12 +370,10 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                     self.marked_faces[obj] = set()
                 
                 # Determine faces to process (Coplanar logic)
-                if context.scene.cursor_bbox_select_coplanar:
-                     angle_rad = context.scene.cursor_bbox_coplanar_angle
-                     coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
-                     faces_to_process = coplanar_indices if coplanar_indices else {face_idx}
-                else:
-                     faces_to_process = {face_idx}
+                faces_to_process = get_faces_to_process(
+                    obj, face_idx, context.scene.cursor_bbox_select_coplanar,
+                    context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
+                )
 
                 # Check if we are marking or unmarking based on the clicked face
                 # If clicked face is marked, we unmark group. Else mark group.
@@ -266,18 +403,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 rebuild_marked_faces_visual_data(obj, self.marked_faces.get(obj, set()), use_depsgraph=self.use_depsgraph)
                 
                 # Update bbox preview based on marked faces and points
-                cursor = context.scene.cursor
-                if cursor.rotation_mode == 'QUATERNION':
-                     cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                elif cursor.rotation_mode == 'AXIS_ANGLE':
-                     rot_mat = cursor.matrix.to_3x3()
-                     cursor_rotation = rot_mat.to_euler('XYZ')
-                else:
-                     if cursor.rotation_mode != 'XYZ':
-                         cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                     else:
-                         cursor_rotation = cursor.rotation_euler
-
+                cursor_rotation = get_cursor_rotation_euler(context)
                 update_marked_faces_bbox(self.marked_faces, self.push_value, 
                                        context.scene.cursor.location, 
                                        cursor_rotation,
@@ -324,18 +450,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                     self.report({'INFO'}, f"Marked face {face_idx} on {obj.name}")
                 
                 # Update bbox preview based on marked faces and points
-                cursor = context.scene.cursor
-                if cursor.rotation_mode == 'QUATERNION':
-                     cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                elif cursor.rotation_mode == 'AXIS_ANGLE':
-                     rot_mat = cursor.matrix.to_3x3()
-                     cursor_rotation = rot_mat.to_euler('XYZ')
-                else:
-                     if cursor.rotation_mode != 'XYZ':
-                         cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                     else:
-                         cursor_rotation = cursor.rotation_euler
-                
+                cursor_rotation = get_cursor_rotation_euler(context)
                 update_marked_faces_bbox(self.marked_faces, self.push_value, 
                                        context.scene.cursor.location, 
                                        cursor_rotation,
@@ -345,36 +460,20 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             return {'RUNNING_MODAL'}
         
         elif event.type == 'A' and event.value == 'PRESS':
-            # Add point marker at current cursor location
-            cursor_location = context.scene.cursor.location.copy()
-            self.marked_points.append(cursor_location)
+            self.point_mode = not self.point_mode
+            if self.point_mode:
+                self.report({'INFO'}, "Entered Add Point Mode")
+                self.current_face_data = None 
+                clear_preview_faces() 
+            else:
+                self.report({'INFO'}, "Exited Add Point Mode")
+                clear_preview_point()
+                self.limit_plane_mode = False
+                clear_limitation_plane()
+                disable_limitation_plane(context) # Ensure visual is off
+                self.cached_limit_intersections = []
             
-            # Also call the global function to ensure handlers
-            add_marked_point(cursor_location)
-            
-            self.report({'INFO'}, f"Added point marker at cursor location ({len(self.marked_points)} total points)")
-            
-            # Update bbox preview to include the new point
-            if self.marked_faces or self.marked_points:
-                # Update preview with marked faces and points
-                cursor = context.scene.cursor
-                if cursor.rotation_mode == 'QUATERNION':
-                     cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                elif cursor.rotation_mode == 'AXIS_ANGLE':
-                     rot_mat = cursor.matrix.to_3x3()
-                     cursor_rotation = rot_mat.to_euler('XYZ')
-                else:
-                     if cursor.rotation_mode != 'XYZ':
-                         cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                     else:
-                         cursor_rotation = cursor.rotation_euler
-                
-                update_marked_faces_bbox(self.marked_faces, self.push_value, 
-                                       context.scene.cursor.location, 
-                                       cursor_rotation,
-                                       marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
             context.area.tag_redraw()
-            
             return {'RUNNING_MODAL'}
         
         elif event.type == 'Z' and event.value == 'PRESS':
@@ -382,7 +481,6 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             if self.marked_faces or self.marked_points:
                 clear_all_markings()  # Clear global state
                 clear_preview_faces()
-                self.marked_faces.clear()  # Clear local state
                 self.marked_faces.clear()  # Clear local state
                 self.marked_points.clear()  # Clear local state
                 self.report({'INFO'}, "Cleared all marked faces and points")
@@ -394,7 +492,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             
             return {'RUNNING_MODAL'}
         
-        elif event.type == 'WHEELUPMOUSE' and not event.shift and not event.ctrl:
+        elif event.type == 'WHEELUPMOUSE' and event.alt:
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
                 self.current_face_data = face_data
@@ -407,18 +505,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 if result['success']:
                     # Update preview with marked faces and points if any
                     if self.marked_faces or self.marked_points:
-                        cursor = context.scene.cursor
-                        if cursor.rotation_mode == 'QUATERNION':
-                             cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                        elif cursor.rotation_mode == 'AXIS_ANGLE':
-                             rot_mat = cursor.matrix.to_3x3()
-                             cursor_rotation = rot_mat.to_euler('XYZ')
-                        else:
-                             if cursor.rotation_mode != 'XYZ':
-                                 cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                             else:
-                                 cursor_rotation = cursor.rotation_euler
-
+                        cursor_rotation = get_cursor_rotation_euler(context)
                         update_marked_faces_bbox(self.marked_faces, self.push_value,
                                                context.scene.cursor.location,
                                                cursor_rotation,
@@ -426,7 +513,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                     context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
-        elif event.type == 'WHEELDOWNMOUSE' and not event.shift and not event.ctrl:
+        elif event.type == 'WHEELDOWNMOUSE' and event.alt:
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
                 self.current_face_data = face_data
@@ -439,18 +526,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 if result['success']:
                     # Update preview with marked faces and points if any
                     if self.marked_faces or self.marked_points:
-                        cursor = context.scene.cursor
-                        if cursor.rotation_mode == 'QUATERNION':
-                             cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                        elif cursor.rotation_mode == 'AXIS_ANGLE':
-                             rot_mat = cursor.matrix.to_3x3()
-                             cursor_rotation = rot_mat.to_euler('XYZ')
-                        else:
-                             if cursor.rotation_mode != 'XYZ':
-                                 cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                             else:
-                                 cursor_rotation = cursor.rotation_euler
-
+                        cursor_rotation = get_cursor_rotation_euler(context)
                         update_marked_faces_bbox(self.marked_faces, self.push_value,
                                                context.scene.cursor.location,
                                                cursor_rotation,
@@ -459,6 +535,60 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             return {'RUNNING_MODAL'}
         
         elif event.type == 'MOUSEMOVE':
+            if self.point_mode:
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                current_loc = None
+                
+                if self.snap_enabled:
+                    # Snap Logic - use intersection points if limit plane mode is enabled
+                    intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
+                    snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph)
+                    if snap_result['success']:
+                        current_loc = context.scene.cursor.location.copy()
+                    else:
+                        # Fallback to normal raycast alignment
+                        result = place_cursor_with_raycast_and_edge(
+                           context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph
+                        )
+                        if result['success']:
+                            current_loc = result['location']
+                        else:
+                            current_loc = None
+                elif self.limit_plane_mode and self.limitation_plane_matrix and face_data:
+                     # Limit Plane Mode (no snap)
+                     plane_origin = self.limitation_plane_matrix.to_translation()
+                     plane_normal = self.limitation_plane_matrix.col[2].to_3d() # Z axis
+                     
+                     proj_pt = project_point_to_plane_intersection(
+                         face_data['hit_location'], 
+                         face_data['face_normal'],
+                         plane_origin, 
+                         plane_normal
+                     )
+                     
+                     if proj_pt:
+                         current_loc = proj_pt
+                     else:
+                         current_loc = None
+                else:
+                    # Standard raycast alignment (updates cursor location and rotation)
+                    result = place_cursor_with_raycast_and_edge(
+                        context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph
+                    )
+                    if result['success']:
+                        current_loc = result['location']
+                    else:
+                        current_loc = None
+                
+                if current_loc:
+                    update_preview_point(current_loc)
+                else:
+                    clear_preview_point()
+                
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            
+            # Normal MOUSEMOVE
             result = place_cursor_with_raycast_and_edge(
                 context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph
             )
@@ -469,30 +599,17 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 obj = result['face_data']['object']
                 face_idx = result['face_data']['face_index']
                 
-                if context.scene.cursor_bbox_select_coplanar:
-                     angle_rad = context.scene.cursor_bbox_coplanar_angle
-                     coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
-                     faces_to_preview = coplanar_indices if coplanar_indices else {face_idx}
-                else:
-                     faces_to_preview = {face_idx}
+                faces_to_preview = get_faces_to_process(
+                    obj, face_idx, context.scene.cursor_bbox_select_coplanar,
+                    context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
+                )
                 
                 update_preview_faces(obj, faces_to_preview, use_depsgraph=self.use_depsgraph)
 
                 # Update bbox preview - show marked faces and points bbox if any, otherwise object bbox
                 if self.marked_faces or self.marked_points:
                     # Update preview with marked faces and points
-                    cursor = context.scene.cursor
-                    if cursor.rotation_mode == 'QUATERNION':
-                         cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                    elif cursor.rotation_mode == 'AXIS_ANGLE':
-                         rot_mat = cursor.matrix.to_3x3()
-                         cursor_rotation = rot_mat.to_euler('XYZ')
-                    else:
-                         if cursor.rotation_mode != 'XYZ':
-                             cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                         else:
-                             cursor_rotation = cursor.rotation_euler
-
+                    cursor_rotation = get_cursor_rotation_euler(context)
                     update_marked_faces_bbox(self.marked_faces, self.push_value,
                                            context.scene.cursor.location,
                                            cursor_rotation,
@@ -505,35 +622,29 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             return {'RUNNING_MODAL'}
         
         elif event.type == 'S' and event.value == 'PRESS':
-            # Snap cursor to closest vertex, edge midpoint, or face center from current face
-            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
-            result = snap_cursor_to_closest_element(context, event, face_data)
-            if result['success'] and (not face_data or face_data['object'] in self.original_selected_objects):
-                if face_data:
-                    self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
-                else:
-                    self.report({'INFO'}, f"Cursor snapped to {result['type']} ({result['distance']:.1f}px away)")
-                # Update bbox preview after cursor snap
-                if self.marked_faces or self.marked_points:
-                    cursor = context.scene.cursor
-                    if cursor.rotation_mode == 'QUATERNION':
-                         cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
-                    elif cursor.rotation_mode == 'AXIS_ANGLE':
-                         rot_mat = cursor.matrix.to_3x3()
-                         cursor_rotation = rot_mat.to_euler('XYZ')
-                    else:
-                         if cursor.rotation_mode != 'XYZ':
-                             cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
-                         else:
-                             cursor_rotation = cursor.rotation_euler
-
-                    update_marked_faces_bbox(self.marked_faces, self.push_value,
-                                           context.scene.cursor.location,
-                                           cursor_rotation,
-                                           marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
-                context.area.tag_redraw()
+            if self.point_mode:
+                self.snap_enabled = not self.snap_enabled
+                state_str = "ON" if self.snap_enabled else "OFF"
+                self.report({'INFO'}, f"Point Snap: {state_str} (Threshold: {self.snap_threshold}px)")
             else:
-                self.report({'WARNING'}, "No suitable snap target found")
+                # Snap cursor to closest vertex, edge midpoint, or face center from current face
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph)
+                if result['success'] and (not face_data or face_data['object'] in self.original_selected_objects):
+                    if face_data:
+                        self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
+                    else:
+                        self.report({'INFO'}, f"Cursor snapped to {result['type']} ({result['distance']:.1f}px away)")
+                    # Update bbox preview after cursor snap
+                    if self.marked_faces or self.marked_points:
+                        cursor_rotation = get_cursor_rotation_euler(context)
+                        update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                               context.scene.cursor.location,
+                                               cursor_rotation,
+                                               marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                    context.area.tag_redraw()
+                else:
+                    self.report({'WARNING'}, "No suitable snap target found")
             return {'RUNNING_MODAL'}
         
 
@@ -545,19 +656,14 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         self.align_to_face = context.scene.cursor_bbox_align_face
         self.marked_faces = {}
         self.marked_points = []
+        self.point_mode = False
+        self.snap_enabled = True
+        self.limit_plane_mode = False
+        self.limitation_plane_matrix = None
 
         # Check for immediate execution in Edit Mode
         if context.mode == 'EDIT_MESH':
-            objects_in_edit = [o for o in context.selected_objects if o.type == 'MESH' and o.mode == 'EDIT']
-            if context.active_object and context.active_object.mode == 'EDIT' and context.active_object not in objects_in_edit:
-                objects_in_edit.append(context.active_object)
-            
-            for obj in objects_in_edit:
-                bm = bmesh.from_edit_mesh(obj.data)
-                bm.faces.ensure_lookup_table()
-                selected_indices = {f.index for f in bm.faces if f.select}
-                if selected_indices:
-                    self.marked_faces[obj] = selected_indices
+            self.marked_faces = get_selected_faces_from_edit_mode(context)
             
             if self.marked_faces:
                 active_obj = context.active_object

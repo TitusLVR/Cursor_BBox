@@ -1,8 +1,10 @@
+![Cursor BBox Addon](img/cursor_bbox_addon.png)
+
 # Usage
 
 ## Getting Started
 
-The Cursor BBox addon provides both quick one-click operations and powerful interactive modal tools. This guide covers all features, controls, and workflows in detail.
+The Cursor BBox addon provides both quick one-click operations and powerful interactive modal tools. This guide covers all features, controls, and workflows.
 
 ## Core Workflow
 
@@ -26,9 +28,9 @@ These operators run in a modal state, allowing you to interact with the scene be
 **Purpose:** Place the 3D cursor precisely and create an aligned bounding box.
 
 **How it works:**
-- Fits a box around the *active object* (last selected) or *marked elements* (if faces/points are marked)
-- The box orientation follows the cursor's rotation, which can be aligned to faces and edges
-- Real-time preview shows the bounding box before finalization
+- Fits a box around the active object (last selected) or marked elements (if faces/points are marked)
+- Box orientation follows the cursor's rotation, which can be aligned to faces and edges
+- Real-time preview displays the bounding box before finalization
 
 **Key Features:**
 - **Raycast alignment**: Hover over faces to align the cursor to surface normals
@@ -57,7 +59,7 @@ These operators run in a modal state, allowing you to interact with the scene be
 
 **How it works:**
 - Generates a convex hull (the smallest convex shape) that encloses all marked faces and points
-- The hull is calculated from the vertices of marked faces plus any custom points
+- Hull is calculated from the vertices of marked faces plus any custom points
 - Creates a new mesh object with the hull geometry
 
 **Key Features:**
@@ -87,8 +89,8 @@ These operators run in a modal state, allowing you to interact with the scene be
 
 **How it works:**
 - Calculates the minimum-radius sphere that encloses all marked vertices and points
-- The sphere center is the geometric center of all marked elements
-- Radius is automatically calculated to encompass everything
+- Sphere center is the geometric center of all marked elements
+- Radius is automatically calculated to encompass all marked elements
 
 **Key Features:**
 - **Automatic calculation**: Center and radius computed from marked elements
@@ -122,9 +124,9 @@ These are quick, one-click operations that don't enter a modal state. Perfect fo
 - Uses current scene settings (Push Offset, Align to Face)
 - Works with multiple selected objects
 - No modal interaction required
-- Fastest way to create a bounding box
+- Fastest method to create a bounding box
 
-**When to use:** Quick bounding box creation when you don't need precise cursor placement or face marking.
+**When to use:** Quick bounding box creation when precise cursor placement or face marking is not required.
 
 ### From Selection
 
@@ -136,7 +138,7 @@ These are quick, one-click operations that don't enter a modal state. Perfect fo
 - Applies Push Offset if configured
 - Simple and straightforward
 
-**When to use:** When you need a basic bounding box without alignment considerations.
+**When to use:** When a basic bounding box without alignment considerations is sufficient.
 
 ### Set Cursor Only
 
@@ -146,9 +148,9 @@ These are quick, one-click operations that don't enter a modal state. Perfect fo
 - Same raycasting logic as Interactive Box
 - Respects "Align to Face" setting
 - Exits immediately after placement
-- Perfect for cursor positioning workflows
+- Ideal for cursor positioning workflows
 
-**When to use:** When you only need to position the cursor precisely, without creating bounding shapes.
+**When to use:** When precise cursor positioning is needed without creating bounding shapes.
 
 ---
 
@@ -197,7 +199,7 @@ All settings are accessible in the Cursor BBox panel (`N` key in 3D Viewport).
 
 **Push Offset** (Float, default: 0.01)
 - Inflates or deflates the generated geometry by this amount
-- Positive values expand outward, negative values shrink inward
+- Positive values expand outward; negative values shrink inward
 - Applied globally to Box and Hull operations
 - Useful for creating collision meshes with padding
 
@@ -214,7 +216,7 @@ All settings are accessible in the Cursor BBox panel (`N` key in 3D Viewport).
 - Can be toggled during modal operations with `C` key
 
 **Angle Threshold** (Float, default: 5°)
-- The angular tolerance for detecting coplanar faces
+- Angular tolerance for detecting coplanar faces
 - Lower values = stricter (only very flat surfaces)
 - Higher values = more lenient (includes slightly curved surfaces)
 - Adjustable during operation with `Shift + Scroll`
@@ -227,7 +229,7 @@ All settings are accessible in the Cursor BBox panel (`N` key in 3D Viewport).
 
 **Color** (RGB, default: Orange #FF943B)
 - Color applied to the material and object color
-- Can be customized per-project
+- Customizable per-project
 - Updates existing objects in the collection when changed
 
 ### Naming & Organization
@@ -297,18 +299,18 @@ All settings are accessible in the Cursor BBox panel (`N` key in 3D Viewport).
 
 2. **Active Object**: The last selected object (active object) is used as the primary target for some operations.
 
-3. **Combining Marking Methods**: You can combine face marking and point addition for complex bounding calculations.
+3. **Combining Marking Methods**: Combine face marking and point addition for complex bounding calculations.
 
-4. **Coplanar Selection**: Use coplanar selection for flat surfaces - it's much faster than marking faces individually.
+4. **Coplanar Selection**: Use coplanar selection for flat surfaces—it's faster than marking faces individually.
 
-5. **Visual Feedback**: Pay attention to the color-coded feedback - green for edges, red for marked faces.
+5. **Visual Feedback**: Pay attention to the color-coded feedback: green for edges, red for marked faces.
 
 6. **Push Offset**: Use small positive values (0.01-0.1) for collision meshes to prevent intersection issues.
 
 7. **Collection Organization**: Keep bounding volumes in a separate collection for easy management and toggling.
 
-8. **Material System**: Enable materials if you want visual distinction, or disable for cleaner viewport.
+8. **Material System**: Enable materials for visual distinction, or disable for a cleaner viewport.
 
-9. **Angle Threshold**: Start with default (5°) and adjust based on your geometry's flatness.
+9. **Angle Threshold**: Start with the default (5°) and adjust based on your geometry's flatness.
 
-10. **Cancel Anytime**: Don't hesitate to cancel (`ESC`) and restart if something doesn't look right - the workflow is designed to be iterative.
+10. **Cancel Anytime**: Cancel (`ESC`) and restart if needed—the workflow is designed to be iterative.

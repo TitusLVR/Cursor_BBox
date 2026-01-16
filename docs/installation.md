@@ -1,3 +1,5 @@
+![Cursor BBox Addon](img/cursor_bbox_addon.png)
+
 # Installation
 
 ## Quick Start
@@ -51,7 +53,7 @@ After installation, you may want to:
 ## Requirements
 
 ### Minimum Requirements
-- **Blender Version**: 3.0 or higher (tested up to 4.0+)
+- **Blender Version**: 3.0 or higher (tested up to 5.0+)
 - **GPU**: Any GPU with OpenGL support (required for viewport drawing)
 - **Python**: Included with Blender (no separate installation needed)
 

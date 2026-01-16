@@ -1,8 +1,8 @@
+![Cursor BBox Addon](img/cursor_bbox_addon.png)
+
 # Cursor Aligned Bounding Box
 
 A powerful Blender addon for precise 3D cursor placement and intelligent bounding shape creation. Create perfectly aligned bounding boxes, convex hulls, and bounding spheres with advanced marking, snapping, and visual feedback features.
-
-![Cursor BBox Addon](img/cursor_bbox_addon.png)
 
 ## Useful Links
 
@@ -12,7 +12,7 @@ A powerful Blender addon for precise 3D cursor placement and intelligent boundin
 
 ## Overview
 
-Cursor BBox revolutionizes how you work with bounding volumes in Blender. Instead of manually aligning objects or using basic bounding box tools, this addon provides an interactive, modal workflow that lets you:
+Cursor BBox provides an interactive, modal workflow for working with bounding volumes in Blender. The addon enables you to:
 
 - **Place the 3D cursor** with pixel-perfect precision using raycasting
 - **Create aligned bounding shapes** that automatically orient to your geometry
@@ -21,35 +21,35 @@ Cursor BBox revolutionizes how you work with bounding volumes in Blender. Instea
 - **Snap precisely** to vertices, edges, and face centers
 - **Visualize everything** in real-time with color-coded feedback
 
-Perfect for game development, collision mesh creation, architectural visualization, and any workflow requiring precise bounding volumes.
+Ideal for game development, collision mesh creation, architectural visualization, and any workflow requiring precise bounding volumes.
 
 ## Key Features
 
-### 🎯 Precision Cursor Placement
+### Precision Cursor Placement
 - **Raycast-based positioning**: Hover over any surface to place the cursor exactly where you need it
 - **Face alignment**: Automatically align the cursor rotation to face normals
 - **Edge-based orientation**: Use mouse wheel to cycle through edge alignments for perfect box orientation
 - **Smart snapping**: Snap to vertices, edges, or face centers with a single keypress
 
-### 📦 Multiple Bounding Shape Types
+### Multiple Bounding Shape Types
 - **Interactive Box**: Create axis-aligned or face-aligned bounding boxes
 - **Interactive Hull**: Generate convex hulls wrapping marked geometry
 - **Interactive Sphere**: Create bounding spheres encompassing selected elements
 - **Auto Fit Box**: One-click bounding box generation with current settings
 
-### 🎨 Advanced Marking System
+### Advanced Marking System
 - **Face marking**: Selectively mark faces to include only specific regions in calculations
 - **Point marking**: Add custom points in 3D space to influence bounding calculations
 - **Coplanar selection**: Automatically select connected coplanar faces with adjustable angle threshold
 - **Visual feedback**: See marked faces highlighted in red, selected edges in green
 
-### ⚙️ Flexible Configuration
+### Flexible Configuration
 - **Push offset**: Inflate or deflate generated geometry by a specified amount
 - **Material system**: Automatically apply materials and colors to created objects
 - **Collection management**: Organize generated objects into dedicated collections
 - **Custom naming**: Configure naming patterns for different shape types
 
-### 🎮 Intuitive Controls
+### Intuitive Controls
 - **Modal workflow**: Stay in the tool for multiple operations without exiting
 - **Keyboard shortcuts**: Efficient key-based controls for all operations
 - **Pie menu support**: Quick access via Shift+Alt+C

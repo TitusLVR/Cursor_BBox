@@ -15,7 +15,9 @@ from ..ui.draw import (
     enable_face_marking,
     disable_face_marking,
     ensure_handlers_enabled,
-    refresh_all_handlers
+    refresh_all_handlers,
+    enable_limitation_plane,
+    disable_limitation_plane
 )
 
 # ===== STATE MANAGEMENT =====
@@ -39,6 +41,9 @@ class CursorBBoxState:
 
         # Visual settings
         self.show_backfaces = False
+        self.preview_culling = False # Default OFF (Double Sided)
+        self.preview_point = None
+        self.limitation_plane_matrix = None
         
     def cleanup(self):
         """Clean up all state and handlers"""
@@ -342,6 +347,33 @@ def clear_preview_faces():
     """Clear face preview"""
     global _state
     _state.preview_faces_visual_cache.clear()
+
+def update_preview_point(location):
+    """Update preview point location"""
+    global _state
+    # Ensure handlers (specifically face marking which handles points)
+    ensure_handlers_enabled(_state)
+    _state.preview_point = location
+
+def clear_preview_point():
+    """Clear preview point"""
+    global _state
+    _state.preview_point = None
+
+def update_limitation_plane(matrix):
+    """Update limitation plane matrix"""
+    global _state
+    if 'limitation_plane' not in _state.handlers:
+        enable_limitation_plane(_state)
+    _state.limitation_plane_matrix = matrix
+
+def clear_limitation_plane():
+    """Clear limitation plane"""
+    global _state
+    _state.limitation_plane_matrix = None
+    if 'limitation_plane' in _state.handlers:
+        disable_limitation_plane(_state)
+
 # ===== DRAWING STATE HELPERS =====
 
 def toggle_backface_rendering():
@@ -354,6 +386,17 @@ def get_backface_rendering():
     """Get current backface rendering state"""
     global _state
     return _state.show_backfaces
+
+def toggle_preview_culling():
+    """Toggle preview backface culling state"""
+    global _state
+    _state.preview_culling = not _state.preview_culling
+    return _state.preview_culling
+
+def get_preview_culling():
+    """Get current preview backface culling state"""
+    global _state
+    return _state.preview_culling
 
 # ===== BBOX CALCULATIONS =====
 
@@ -542,6 +585,18 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
         
         # Calculate hull
         bmesh.ops.convex_hull(bm, input=bm.verts)
+        
+        # Remove any loose vertices that are not connected to faces
+        # After convex_hull, some vertices may not be part of any face
+        verts_to_remove = [v for v in bm.verts if not v.link_faces]
+        if verts_to_remove:
+            bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
+        
+        # Ensure lookup tables are valid after deletion
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
         # Apply push value (inflate)
@@ -587,8 +642,8 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
         print(f"Error updating convex hull preview: {e}")
         _state.current_bbox_data = None
 
-def update_marked_faces_sphere(marked_faces_dict, marked_points=None, use_depsgraph=False):
-    """Update preview with bounding sphere of marked faces/points"""
+def update_marked_faces_sphere(marked_faces_dict, cursor_location, cursor_rotation, marked_points=None, use_depsgraph=False):
+    """Update preview with bounding sphere of marked faces/points (Cursor Aligned)"""
     global _state
     
     try:
@@ -632,11 +687,18 @@ def update_marked_faces_sphere(marked_faces_dict, marked_points=None, use_depsgr
         if 'bbox_preview' not in _state.handlers:
             enable_bbox_preview(_state)
 
-        # Calculate Center and Radius
-        min_co = Vector(all_vertices[0])
-        max_co = Vector(all_vertices[0])
+        # Transform to Local Space of Cursor for "Oriented" Bounding calculation
+        cursor_rot_mat = cursor_rotation.to_matrix()
+        cursor_matrix = Matrix.Translation(cursor_location) @ cursor_rot_mat.to_4x4()
+        cursor_matrix_inv = cursor_matrix.inverted()
         
-        for v in all_vertices:
+        local_verts = [cursor_matrix_inv @ v for v in all_vertices]
+
+        # Calculate Center (BBox Center in Local Space)
+        min_co = Vector(local_verts[0])
+        max_co = Vector(local_verts[0])
+        
+        for v in local_verts:
             min_co.x = min(min_co.x, v.x)
             min_co.y = min(min_co.y, v.y)
             min_co.z = min(min_co.z, v.z)
@@ -644,15 +706,19 @@ def update_marked_faces_sphere(marked_faces_dict, marked_points=None, use_depsgr
             max_co.y = max(max_co.y, v.y)
             max_co.z = max(max_co.z, v.z)
             
-        center = (min_co + max_co) / 2.0
+        local_center = (min_co + max_co) / 2.0
         
+        # Calculate Radius (Max Distance from Center in Local Space)
         radius = 0.0
-        for v in all_vertices:
-            dist = (v - center).length
+        for v in local_verts:
+            dist = (v - local_center).length
             if dist > radius:
                 radius = dist
         
         radius = max(radius, 0.05)
+        
+        # Calculate World Center for the Sphere
+        world_center = cursor_matrix @ local_center
                 
         # Generate Sphere Geometry
         bm = bmesh.new()
@@ -674,11 +740,21 @@ def update_marked_faces_sphere(marked_faces_dict, marked_points=None, use_depsgr
                 radius=0.5
             )
         
-        # Scale and Translate
-        mat = Matrix.Translation(center) @ Matrix.Scale(radius * 2, 4)
+        # Scale, Rotate and Translate
+        # Matrix multiplication order: Translation @ Rotation @ Scale (applied right to left typically for vectors? 
+        # In blender python matrix multiplication A @ B corresponds to applying B then A if transforming column vector v as (A @ B) @ v.
+        # So we want Scale first, then Rotate, then Translate.
+        # mat = T @ R @ S
+        mat = Matrix.Translation(world_center) @ cursor_rot_mat.to_4x4() @ Matrix.Scale(radius * 2, 4)
         
         bmesh.ops.transform(bm, matrix=mat, verts=list(bm.verts))
         
+        # Extract edges BEFORE triangulation to keep quad wireframe look
+        edge_verts = []
+        for e in bm.edges:
+            edge_verts.append(e.verts[0].co.copy())
+            edge_verts.append(e.verts[1].co.copy())
+            
         # Triangulate for face drawing
         bmesh.ops.triangulate(bm, faces=bm.faces)
         
@@ -686,18 +762,13 @@ def update_marked_faces_sphere(marked_faces_dict, marked_points=None, use_depsgr
         for f in bm.faces:
              for v in f.verts:
                  face_verts.append(v.co.copy())
-        
-        edge_verts = []
-        for e in bm.edges:
-            edge_verts.append(e.verts[0].co.copy())
-            edge_verts.append(e.verts[1].co.copy())
             
         bm.free()
 
         _state.current_bbox_data = {
             'edges': edge_verts,
             'faces': face_verts,
-            'center': center,
+            'center': world_center,
             'dimensions': Vector((radius*2, radius*2, radius*2))
         }
 
@@ -1182,3 +1253,17 @@ def refresh_all_handlers_wrapper():
     """Wrapper for refresh_all_handlers"""
     global _state
     refresh_all_handlers(_state)
+
+def enable_limitation_plane_wrapper(context, matrix):
+    """Wrapper for enable_limitation_plane - accepts context and matrix"""
+    global _state
+    if 'limitation_plane' not in _state.handlers:
+        enable_limitation_plane(_state)
+    _state.limitation_plane_matrix = matrix
+
+def disable_limitation_plane_wrapper(context):
+    """Wrapper for disable_limitation_plane - accepts context"""
+    global _state
+    if 'limitation_plane' in _state.handlers:
+        disable_limitation_plane(_state)
+    _state.limitation_plane_matrix = None

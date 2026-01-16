@@ -1,8 +1,10 @@
+![Cursor BBox Addon](docs/img/cursor_bbox_addon.png)
+
 # Cursor Aligned Bounding Box
 
 Blender addon for precise cursor placement and cursor-aligned bounding box creation with advanced marking and snapping features.
 
-📖 **[Full Documentation](https://tituslvr.github.io/Cursor_BBox/)** | 📂 **[GitHub Repository](https://github.com/TitusLVR/Cursor_BBox)** | ⬇️ **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
+**[Full Documentation](https://tituslvr.github.io/Cursor_BBox/)** | **[GitHub Repository](https://github.com/TitusLVR/Cursor_BBox)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
 
 
 ## Features
@@ -15,9 +17,9 @@ Blender addon for precise cursor placement and cursor-aligned bounding box creat
 
 ## Installation
 
-1. Place files in: `[Blender]/scripts/addons/Cursor_BBox/`
-2. Enable in Preferences > Add-ons > "Cursor Aligned Bounding Box"
-3. Access via View3D > Sidebar (N) > Cursor BBox
+1. Copy the `Cursor_BBox` folder to your Blender addons directory: `[Blender]/scripts/addons/`
+2. Enable the addon in **Edit > Preferences > Add-ons** (search for "Cursor Aligned Bounding Box")
+3. Access the panel via **View3D Sidebar** (press `N`) > **Cursor BBox** tab
 
 ## Requirements
 

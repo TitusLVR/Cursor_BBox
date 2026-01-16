@@ -2,7 +2,22 @@ import bpy
 import bmesh
 from mathutils import Vector, Matrix
 from math import radians, degrees
-from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, get_connected_coplanar_faces, ensure_cbb_collection, ensure_cbb_material, assign_object_styles
+from ..functions.utils import (
+    get_face_edges_from_raycast,
+    select_edge_by_scroll,
+    place_cursor_with_raycast_and_edge,
+    snap_cursor_to_closest_element,
+    get_connected_coplanar_faces,
+    project_point_to_plane_intersection,
+    calculate_plane_edge_intersections,
+    ensure_cbb_collection,
+    ensure_cbb_material,
+    assign_object_styles,
+    get_cursor_rotation_euler,
+    get_selected_faces_from_edit_mode,
+    calculate_point_location,
+    get_faces_to_process
+)
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
     disable_edge_highlight_wrapper as disable_edge_highlight,
@@ -23,7 +38,15 @@ from ..functions.core import (
 
     clear_preview_faces,
     toggle_backface_rendering,
-    get_backface_rendering
+    get_backface_rendering,
+    toggle_preview_culling,
+    get_preview_culling,
+    update_preview_point,
+    clear_preview_point,
+    update_limitation_plane,
+    clear_limitation_plane,
+    enable_limitation_plane_wrapper as enable_limitation_plane,
+    disable_limitation_plane_wrapper as disable_limitation_plane
 )
 
 def create_bounding_sphere_from_marked(marked_faces_dict, marked_points=None, select_new_object=True, use_depsgraph=False):
@@ -159,6 +182,28 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
     original_selected_objects = set()
     use_depsgraph = False
     
+    align_to_face: bpy.props.BoolProperty(
+        name="Align to Face",
+        description="Align cursor rotation to face normal",
+        default=True
+    )
+    
+    snap_threshold: bpy.props.IntProperty(
+        name="Snap Threshold",
+        default=120,
+        min=1,
+        max=500,
+        description="Distance in pixels to snap to elements"
+    )
+    
+    current_edge_index: bpy.props.IntProperty(default=0)
+    current_face_data = None
+    
+    # Limitation Plane State
+    limit_plane_mode = False
+    limitation_plane_matrix = None
+    cached_limit_intersections = []
+    
     def modal(self, context, event):
         # Update status bar
         has_marked = bool(self.marked_faces)
@@ -173,9 +218,19 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         deps_state = "ON" if self.use_depsgraph else "OFF"
         coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
         backface_state = "ON" if get_backface_rendering() else "OFF"
-        context.area.header_text_set(
-            f"{status_text} | LMB: Mark/Unmark | C: Coplanar ({coplanar_state}) | P: Backfaces ({backface_state}) | D: Depsgraph ({deps_state}) | 1-7: Angle Presets | Shift(+Ctrl)+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | A: Add Point | Z: Clear"
-        )
+        preview_cull_state = "ON" if get_preview_culling() else "OFF"
+        preview_cull_state = "ON" if get_preview_culling() else "OFF"
+        
+        if self.point_mode:
+            snap_state = "ON" if self.snap_enabled else "OFF"
+            limit_state = "ON" if self.limit_plane_mode else "OFF"
+            context.area.header_text_set(
+                f"-- POINT MODE -- | LMB: Add Point | S: Snap ({snap_state}) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | C: Limit Plane ({limit_state}) | A: Exit Mode | ESC: Cancel"
+            )
+        else:
+            context.area.header_text_set(
+                f"{status_text} | LMB/F: Mark/Unmark | C: Coplanar ({coplanar_state}) | P: Backfaces ({backface_state}) | O: Preview Cull ({preview_cull_state}) | D: Depsgraph ({deps_state}) | Alt+Scroll: Edge | Ctrl+Scroll: Snap Thresh | 1-7: Angle Presets | Shift(+Ctrl): Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | A: Add Point Mode | S: Snap | Z: Clear"
+            )
         
         # Toggle Depsgraph (D)
         if event.type == 'D' and event.value == 'PRESS':
@@ -185,7 +240,11 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                 rebuild_marked_faces_visual_data(obj, faces, use_depsgraph=self.use_depsgraph)
             
             # Update Preview (Sphere)
-            update_marked_faces_sphere(self.marked_faces, marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+            cursor_rotation = get_cursor_rotation_euler(context)
+            update_marked_faces_sphere(self.marked_faces, 
+                                     context.scene.cursor.location,
+                                     cursor_rotation,
+                                     marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
             
             self.report({'INFO'}, f"Depsgraph: {'ON' if self.use_depsgraph else 'OFF'}")
             context.area.tag_redraw()
@@ -199,6 +258,14 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
              context.area.tag_redraw()
              return {'RUNNING_MODAL'}
              
+        # Toggle Preview Culling (O)
+        elif event.type == 'O' and event.value == 'PRESS':
+             new_state = toggle_preview_culling()
+             state_str = "ON" if new_state else "OFF"
+             self.report({'INFO'}, f"Preview Culling: {state_str}")
+             context.area.tag_redraw()
+             return {'RUNNING_MODAL'}
+
         # Coplanar Angle Presets (1-7)
         elif event.type in {'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX', 'SEVEN'} and event.value == 'PRESS':
              angle_map = {
@@ -233,14 +300,40 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
+        # Snap Threshold Adjustment (Ctrl + Scroll) - Must be before navigation pass-through
+        if event.ctrl and not event.shift and not event.alt:
+            if event.type == 'WHEELUPMOUSE':
+                self.snap_threshold += 10
+                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
+                context.area.tag_redraw()
+            elif event.type == 'WHEELDOWNMOUSE':
+                self.snap_threshold = max(10, self.snap_threshold - 10)
+                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
+                context.area.tag_redraw()
+            
+            # Force update header immediately
+            if self.point_mode:
+                snap_state = "ON" if self.snap_enabled else "OFF"
+                limit_state = "ON" if self.limit_plane_mode else "OFF"
+                context.area.header_text_set(
+                    f"-- POINT MODE -- | LMB: Add Point | S: Snap ({snap_state}) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | C: Limit Plane ({limit_state}) | A: Exit Mode | ESC: Cancel"
+                )
+            else:
+                marking_status = f" ({len(self.marked_faces)} objects marked)" if self.marked_faces else ""
+                context.area.header_text_set(
+                    f"Space: Create Sphere{marking_status} | LMB/F: Mark/Unmark | Alt+Scroll: Edge | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | A: Add Point Mode | Z: Clear | RMB/ESC: Cancel"
+                )
+            
+            return {'RUNNING_MODAL'}
+
         # Navigation
-        if event.type == 'MIDDLEMOUSE' or (event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not event.shift):
+        if event.type == 'MIDDLEMOUSE' or (event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not event.shift and not event.alt and not event.ctrl):
             return {'PASS_THROUGH'}
             
         # Create Sphere (Enter/Space)
         if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} and event.value == 'PRESS':
             if self.marked_faces or self.marked_points:
-                if create_bounding_sphere_from_marked(self.marked_faces, self.marked_points, use_depsgraph=self.use_depsgraph):
+                if create_bounding_sphere_from_marked(self.marked_faces, self.marked_points, select_new_object=False, use_depsgraph=self.use_depsgraph):
                     self.report({'INFO'}, "Created Bounding Sphere. Ready for new selection.")
                     clear_all_markings()
                     clear_preview_faces()
@@ -256,10 +349,47 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             
         # Mark Face (LMB or F)
         elif (event.type == 'LEFTMOUSE' and event.value == 'PRESS') or (event.type == 'F' and event.value == 'PRESS'):
+            if self.point_mode:
+                # Add Point Logic
+                
+                # Get face data from raycast
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                
+                loc, message = calculate_point_location(
+                    context, event, face_data, self.snap_enabled, 
+                    self.limit_plane_mode, self.limitation_plane_matrix,
+                    self.cached_limit_intersections, self.snap_threshold,
+                    use_depsgraph=self.use_depsgraph
+                )
+                
+                if loc is None:
+                    if message:
+                        self.report({'WARNING'}, message)
+                    return {'RUNNING_MODAL'}
+                
+                if message:
+                    self.report({'INFO'}, message)
+                        
+                self.marked_points.append(loc)
+                add_marked_point(loc)
+                
+                # Update Preview
+                cursor_rotation = get_cursor_rotation_euler(context)
+                update_marked_faces_sphere(self.marked_faces, 
+                                         context.scene.cursor.location,
+                                         cursor_rotation,
+                                         marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            
+            # Normal Mark Face Logic
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
                 obj = face_data['object']
                 face_idx = face_data['face_index']
+                
+                # Also place cursor for feedback
+                place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph)
                 
                 if obj not in self.marked_faces:
                     self.marked_faces[obj] = set()
@@ -267,12 +397,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                 # Check if unmarking (if single face is already marked)
                 is_unmarking = face_idx in self.marked_faces[obj]
                 
-                if context.scene.cursor_bbox_select_coplanar:
-                     angle_rad = context.scene.cursor_bbox_coplanar_angle
-                     coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
-                     faces_to_process = coplanar_indices if coplanar_indices else {face_idx}
-                else:
-                     faces_to_process = {face_idx}
+                faces_to_process = get_faces_to_process(
+                    obj, face_idx, context.scene.cursor_bbox_select_coplanar,
+                    context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
+                )
 
                 for idx in faces_to_process:
                     if is_unmarking:
@@ -288,54 +416,325 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                     rebuild_marked_faces_visual_data(obj, self.marked_faces[obj], use_depsgraph=self.use_depsgraph)
                 
                 # Update Preview (Use Sphere preview as it shows extent)
-                update_marked_faces_sphere(self.marked_faces, marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                cursor_rotation = get_cursor_rotation_euler(context)
+                update_marked_faces_sphere(self.marked_faces, 
+                                         context.scene.cursor.location,
+                                         cursor_rotation,
+                                         marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
             
-        # Toggle Coplanar Selection (C)
+        # Toggle Limitation Plane (C)
         elif event.type == 'C' and event.value == 'PRESS':
-            context.scene.cursor_bbox_select_coplanar = not context.scene.cursor_bbox_select_coplanar
-            state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
-            self.report({'INFO'}, f"Coplanar Selection: {state}")
+            self.limit_plane_mode = not self.limit_plane_mode
+            if self.limit_plane_mode:
+                enable_limitation_plane(context, self.limitation_plane_matrix)
+                
+                # Calculate and cache edge intersections for snapping
+                self.cached_limit_intersections = []
+                if context.active_object and context.active_object.type == 'MESH':
+                    origin = self.limitation_plane_matrix.to_translation()
+                    normal = self.limitation_plane_matrix.col[2][:3] 
+                    self.cached_limit_intersections = calculate_plane_edge_intersections(
+                        context.active_object, 
+                        Vector(origin), 
+                        Vector(normal),
+                        use_depsgraph=self.use_depsgraph
+                    )
+                    self.report({'INFO'}, f"Limitation Plane ON | {len(self.cached_limit_intersections)} pts")
+            else:
+                clear_limitation_plane()
+                disable_limitation_plane(context)
+                self.cached_limit_intersections = []
+                self.report({'INFO'}, "Limitation Plane OFF")
+            
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
             
-        # Add Point (A)
+        # Add Point Mode Toggle (A)
         elif event.type == 'A' and event.value == 'PRESS':
-            # Try to get point under mouse
-            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
-            
-            if face_data:
-                # Use the hit location (intersection point)
-                loc = face_data['hit_location']
+            self.point_mode = not self.point_mode
+            if self.point_mode:
+                self.report({'INFO'}, "Entered Add Point Mode")
+                self.current_face_data = None # Reset selection
+                clear_preview_faces() 
             else:
-                # Fallback to cursor location if no valid hit
+                self.report({'INFO'}, "Exited Add Point Mode")
+                clear_preview_point()
+                self.limit_plane_mode = False
+                clear_limitation_plane()
+            
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+            
+        # Left Mouse Click (Add Point in Mode OR Mark Face)
+        elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            if self.point_mode:
+                # Add point at current preview location (which is updated in mousemove)
+                # Recalculate just in case
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
                 loc = context.scene.cursor.location.copy()
                 
-            self.marked_points.append(loc)
-            add_marked_point(loc)
-            update_marked_faces_sphere(self.marked_faces, marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
-            context.area.tag_redraw()
+                # If snap enabled, cursor is already at snap location from mousemove
+                # If snap disabled, cursor is at hit location from mousemove
+                # But mousemove might not have fired if just clicked A then Click without move?
+                # So let's run the logic once to be sure
+                
+                if self.snap_enabled:
+                     snap_result = snap_cursor_to_closest_element(context, event, face_data, use_depsgraph=self.use_depsgraph)
+                     if snap_result['success']:
+                         loc = context.scene.cursor.location.copy()
+                         self.report({'INFO'}, f"Added point snapped to {snap_result['type']}")
+                     elif face_data:
+                         try:
+                             loc = face_data['hit_location']
+                         except:
+                             pass
+                else:
+                    if face_data:
+                        try:
+                            loc = face_data['hit_location']
+                        except:
+                            pass
+                
+                self.marked_points.append(loc)
+                add_marked_point(loc)
+                
+                # Update Sphere Preview
+                cursor_rotation = get_cursor_rotation_euler(context)
+                update_marked_faces_sphere(self.marked_faces, 
+                                         context.scene.cursor.location,
+                                         cursor_rotation,
+                                         marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            
+            # Normal Mark Face Logic (Only if not in Point Mode)
+            # Match 'LEFTMOUSE' or 'F' handler logic from original
+            # Note: The original code handled LEFTMOUSE and F together. 
+            # We need to split them or handle the condition inside.
+            
+            # Since I replaced the 'A' block, I am before the LEFTMOUSE block.
+            # I need to implement the LEFTMOUSE logic here? No, I am inserting this BEFORE existing blocks?
+            # Wait, the tool 'ReplacementChunks' REPLACES content.
+            # I see 'Add Point (A)' block is later in the file around line 358.
+            # 'Mark Face (LMB or F)' is around line 295.
+            # My 'EndLine' logic for replacement needs to be careful.
+            
+            # Let's REPLACE the 'A' handler first (lines 359-390).
+            # AND I need to intercept LMB.
+            # It is cleaner to modify the existing LMB handler to check for point mode.
+            pass
+
+        # Mark Face (LMB or F) - Modified to respect Point Mode
+        # Mark Face (LMB or F) - Modified to respect Point Mode
+        elif (event.type == 'LEFTMOUSE' and event.value == 'PRESS') or (event.type == 'F' and event.value == 'PRESS'):
+            # If in point mode and it was a click (not F), check mode here.
+            
+            if self.point_mode and event.type == 'LEFTMOUSE':
+                 # ... Add point logic ...
+                 face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                 loc = context.scene.cursor.location.copy()
+                 
+                 # Limit Plane Logic for Click
+                 if self.limit_plane_mode and self.limitation_plane_matrix and face_data:
+                     plane_origin = self.limitation_plane_matrix.to_translation()
+                     plane_normal = self.limitation_plane_matrix.col[2].to_3d()
+                     proj_pt = project_point_to_plane_intersection(
+                         face_data['hit_location'], 
+                         face_data['face_normal'],
+                         plane_origin, 
+                         plane_normal
+                     )
+                     if proj_pt:
+                         loc = proj_pt
+                     else:
+                         # No intersection, abort or warn?
+                         self.report({'WARNING'}, "Invalid placement (no intersection)")
+                         return {'RUNNING_MODAL'}
+                 
+                 # Standard Snap Logic (Only if not limited or if limit allows combining?)
+                 # For now, Limit Plane overrides standard snap if active.
+                 elif self.snap_enabled:
+                     snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph)
+                     if snap_result['success']:
+                         loc = context.scene.cursor.location.copy()
+                 elif face_data:
+                      try:
+                         loc = face_data['hit_location']
+                      except:
+                         pass
+                     
+                 self.marked_points.append(loc)
+                 add_marked_point(loc)
+                 
+                 # Update Preview
+                 cursor_rotation = get_cursor_rotation_euler(context)
+                 update_marked_faces_sphere(self.marked_faces, 
+                                          context.scene.cursor.location,
+                                          cursor_rotation,
+                                          marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                 context.area.tag_redraw()
+                 return {'RUNNING_MODAL'}
+            
+            # ... Normal marking logic ...
+
+        elif event.type == 'WHEELUPMOUSE' and event.alt:
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+            if face_data and face_data['object'] in self.original_selected_objects:
+                self.current_face_data = face_data
+                self.current_edge_index = select_edge_by_scroll(
+                    face_data, 1, self.current_edge_index
+                )
+                result = place_cursor_with_raycast_and_edge(
+                    context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph
+                )
+                if result['success']:
+                    # Update Preview (Sphere) if needed
+                    # Note: Sphere preview is based on MARKED faces, not hover cursor.
+                    # BUT cursor rotation changes here. So we MUST update preview if markers exist.
+                    if self.marked_faces or self.marked_points:
+                        cursor_rotation = get_cursor_rotation_euler(context)
+                        update_marked_faces_sphere(self.marked_faces, 
+                                                 context.scene.cursor.location,
+                                                 cursor_rotation,
+                                                 marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+
+                    context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'WHEELDOWNMOUSE' and event.alt:
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+            if face_data and face_data['object'] in self.original_selected_objects:
+                self.current_face_data = face_data
+                self.current_edge_index = select_edge_by_scroll(
+                    face_data, -1, self.current_edge_index
+                )
+                result = place_cursor_with_raycast_and_edge(
+                    context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph
+                )
+                if result['success']:
+                    if self.marked_faces or self.marked_points:
+                        cursor_rotation = get_cursor_rotation_euler(context)
+                        update_marked_faces_sphere(self.marked_faces, 
+                                                 context.scene.cursor.location,
+                                                 cursor_rotation,
+                                                 marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+
+                    context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        elif event.type == 'S' and event.value == 'PRESS':
+            if self.point_mode:
+                self.snap_enabled = not self.snap_enabled
+                state_str = "ON" if self.snap_enabled else "OFF"
+                self.report({'INFO'}, f"Point Snap: {state_str}")
+            else:
+                 # Snap cursor to closest vertex, edge midpoint, or face center from current face
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph)
+                if result['success'] and (not face_data or face_data['object'] in self.original_selected_objects):
+                    if face_data:
+                        self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
+                    else:
+                        self.report({'INFO'}, f"Cursor snapped to {result['type']} ({result['distance']:.1f}px away)")
+                    
+                    # Update bbox preview after cursor snap
+                    if self.marked_faces or self.marked_points:
+                        cursor_rotation = get_cursor_rotation_euler(context)
+                        update_marked_faces_sphere(self.marked_faces, 
+                                                 context.scene.cursor.location,
+                                                 cursor_rotation,
+                                                 marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                    context.area.tag_redraw()
+                else:
+                    self.report({'WARNING'}, "No suitable snap target found")
             return {'RUNNING_MODAL'}
 
         # Mouse Move - Update Preview (Hover)
         elif event.type == 'MOUSEMOVE':
-            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
-            if face_data and face_data['object'] in self.original_selected_objects:
-                obj = face_data['object']
-                face_idx = face_data['face_index']
+            if self.point_mode:
+                # Point Mode Preview Logic
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                current_loc = None
                 
-                if context.scene.cursor_bbox_select_coplanar:
-                     angle_rad = context.scene.cursor_bbox_coplanar_angle
-                     coplanar_indices = get_connected_coplanar_faces(obj, face_idx, angle_rad, use_depsgraph=self.use_depsgraph)
-                     faces_to_preview = coplanar_indices if coplanar_indices else {face_idx}
+                if self.snap_enabled:
+                    # Snap Logic - use intersection points if limit plane mode is enabled
+                    intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
+                    snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph)
+                    if snap_result['success']:
+                        current_loc = context.scene.cursor.location.copy() 
+                    else:
+                        # Fallback to raycast placement if no snap
+                        result = place_cursor_with_raycast_and_edge(
+                           context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph
+                        )
+                        if result['success']:
+                            current_loc = result['location']
+                        else:
+                            current_loc = None
+                elif self.limit_plane_mode and self.limitation_plane_matrix and face_data:
+                     # Limit Plane Mode (no snap)
+                     plane_origin = self.limitation_plane_matrix.to_translation()
+                     plane_normal = self.limitation_plane_matrix.col[2].to_3d() # Z axis
+                     
+                     proj_pt = project_point_to_plane_intersection(
+                         face_data['hit_location'], 
+                         face_data['face_normal'],
+                         plane_origin, 
+                         plane_normal
+                     )
+                     
+                     if proj_pt:
+                         current_loc = proj_pt
+                     else:
+                         current_loc = None
                 else:
-                     faces_to_preview = {face_idx}
+                    # Standard raycast placement (location + rotation)
+                    result = place_cursor_with_raycast_and_edge(
+                        context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph
+                    )
+                    if result['success']:
+                         current_loc = result['location']
+                    else:
+                         current_loc = None
+                
+                if current_loc:
+                    update_preview_point(current_loc)
+                    
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            # Normal Hover Logic
+            result = place_cursor_with_raycast_and_edge(
+                context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph
+            )
+            
+            if result['success'] and result['face_data']['object'] in self.original_selected_objects:
+                self.current_face_data = result['face_data']
+
+                obj = result['face_data']['object']
+                face_idx = result['face_data']['face_index']
+                
+                faces_to_preview = get_faces_to_process(
+                    obj, face_idx, context.scene.cursor_bbox_select_coplanar,
+                    context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
+                )
                 
                 update_preview_faces(obj, faces_to_preview, use_depsgraph=self.use_depsgraph)
+                
+                # Also update sphere preview if we have marked stuff
+                if self.marked_faces or self.marked_points:
+                    cursor_rotation = get_cursor_rotation_euler(context)
+                    update_marked_faces_sphere(self.marked_faces, 
+                                             context.scene.cursor.location,
+                                             cursor_rotation,
+                                             marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+
                 context.area.tag_redraw()
             else:
                 clear_preview_faces()
+                self.current_face_data = None
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
             
@@ -354,6 +753,8 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             disable_face_marking()
             clear_all_markings()
             clear_preview_faces()
+            clear_preview_point()
+            clear_limitation_plane()
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'CANCELLED'}
@@ -365,6 +766,8 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             disable_face_marking()
             clear_all_markings()
             clear_preview_faces()
+            clear_preview_point()
+            clear_limitation_plane()
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'FINISHED'}
@@ -374,20 +777,16 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
     def invoke(self, context, event):
         # Initialize properties
         self.marked_faces = {}
+        self.align_to_face = context.scene.cursor_bbox_align_face
         self.marked_points = []
+        self.point_mode = False
+        self.snap_enabled = True
+        self.limit_plane_mode = False
+        self.limitation_plane_matrix = None
         
         # Check for immediate execution in Edit Mode
         if context.mode == 'EDIT_MESH':
-            objects_in_edit = [o for o in context.selected_objects if o.type == 'MESH' and o.mode == 'EDIT']
-            if context.active_object and context.active_object.mode == 'EDIT' and context.active_object not in objects_in_edit:
-                objects_in_edit.append(context.active_object)
-            
-            for obj in objects_in_edit:
-                bm = bmesh.from_edit_mesh(obj.data)
-                bm.faces.ensure_lookup_table()
-                selected_indices = {f.index for f in bm.faces if f.select}
-                if selected_indices:
-                    self.marked_faces[obj] = selected_indices
+            self.marked_faces = get_selected_faces_from_edit_mode(context)
             
             if self.marked_faces:
                 active_obj = context.active_object
@@ -410,7 +809,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                     pass
 
         if context.area.type == 'VIEW_3D':
+            self.current_edge_index = 0
+            self.current_face_data = None
             # self.marked_faces already initialized above
+            self.align_to_face = context.scene.cursor_bbox_align_face
             
             self.original_selected_objects = set(context.selected_objects)
             if context.active_object:
