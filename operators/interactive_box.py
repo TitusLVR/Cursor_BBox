@@ -1,5 +1,6 @@
 import bpy
 import mathutils
+from mathutils import Vector, Matrix
 from math import radians, degrees
 from ..functions.utils import (
     get_face_edges_from_raycast,
@@ -19,6 +20,7 @@ from ..functions.utils import (
 )
 from ..functions.core import (
     cursor_aligned_bounding_box,
+    calculate_bbox_bounds_optimized,
     enable_edge_highlight_wrapper as enable_edge_highlight,
     disable_edge_highlight_wrapper as disable_edge_highlight,
     enable_bbox_preview_wrapper as enable_bbox_preview,
@@ -46,6 +48,119 @@ from ..functions.core import (
     enable_limitation_plane_wrapper as enable_limitation_plane,
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
+from ..settings.preferences import get_preferences
+
+def create_bounding_box_from_marked(marked_faces_dict, marked_points=None, push_value=0.01, select_new_object=True, use_depsgraph=False):
+    """Create a bounding box from marked faces and points"""
+    from ..functions.utils import collect_vertices_from_marked_faces, setup_new_object, restore_selection_state
+    
+    context = bpy.context
+    cursor = context.scene.cursor
+    
+    # Store explicit reference to the original active object and selected objects
+    original_active = context.view_layer.objects.active
+    original_selected = list(context.selected_objects)
+    
+    # Capture cursor state
+    cursor_location = cursor.location.copy()
+    
+    # Robustly capture rotation as XYZ Euler regardless of mode
+    if cursor.rotation_mode == 'QUATERNION':
+        cursor_rotation = cursor.rotation_quaternion.to_euler('XYZ')
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        aa = cursor.rotation_axis_angle
+        rot_mat = Matrix.Rotation(aa[0], 4, Vector((aa[1], aa[2], aa[3])))
+        cursor_rotation = rot_mat.to_euler('XYZ')
+    else:
+        if cursor.rotation_mode != 'XYZ':
+            cursor_rotation = cursor.rotation_euler.to_matrix().to_euler('XYZ')
+        else:
+            cursor_rotation = cursor.rotation_euler.copy()
+    
+    # Collect vertices from marked faces using shared utility
+    all_world_coords = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph, context=context)
+    
+    # Add marked points
+    if marked_points:
+        all_world_coords.extend(marked_points)
+    
+    if not all_world_coords:
+        print("Error: No vertices found in marked faces or points.")
+        return False
+    
+    # Use optimized calculation
+    local_center, dimensions, cursor_rot_mat = calculate_bbox_bounds_optimized(
+        all_world_coords, cursor_location, cursor_rotation
+    )
+    
+    # Apply push value
+    epsilon = 0.0001
+    dimensions = Vector((
+        max(dimensions.x, epsilon),
+        max(dimensions.y, epsilon),
+        max(dimensions.z, epsilon)
+    ))
+    
+    safe_push_value = float(push_value)
+    if safe_push_value > 0 or abs(safe_push_value) * 2 < min(dimensions):
+        dimensions += Vector((2 * safe_push_value,) * 3)
+    
+    dimensions = Vector((
+        max(dimensions.x, epsilon),
+        max(dimensions.y, epsilon),
+        max(dimensions.z, epsilon)
+    ))
+    
+    world_center = cursor_location + (cursor_rot_mat @ local_center)
+    
+    # Get preferences for bounding box display
+    try:
+        prefs = get_preferences()
+        if prefs:
+            show_wire = prefs.bbox_show_wire
+            show_all_edges = prefs.bbox_show_all_edges
+        else:
+            show_wire = True
+            show_all_edges = True
+    except:
+        show_wire = True
+        show_all_edges = True
+    
+    # Create bbox object
+    from ..functions.utils import preserve_selection_state
+    
+    with preserve_selection_state(context) as state:
+        state.deselect_all()
+        
+        bpy.ops.mesh.primitive_cube_add(
+            size=1,
+            enter_editmode=False,
+            align='WORLD',
+            location=world_center,
+            rotation=cursor_rotation
+        )
+        
+        bbox_obj = context.active_object
+        bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
+        
+        # Set up object (collection, styles)
+        setup_new_object(context, bbox_obj, assign_styles=True, move_to_collection=True)
+        
+        bbox_obj.scale = dimensions
+        bbox_obj.show_wire = show_wire
+        bbox_obj.show_all_edges = show_all_edges
+        
+        bbox_obj.select_set(False)
+        
+        # Handle selection
+        if select_new_object:
+            bbox_obj.select_set(True)
+            context.view_layer.objects.active = bbox_obj
+        else:
+            # Restore original selection state
+            restore_selection_state(context, original_selected, original_active)
+    
+    return True
 
 class CursorBBox_OT_interactive_box(bpy.types.Operator):
     """Place cursor and create bounding box with face marking support"""
@@ -188,9 +303,9 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             else:
                 marking_status = f" ({len(self.marked_faces)} objects marked)" if self.marked_faces else ""
                 coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
-                backface_state = "ON" if context.scene.cursor_bbox_backface_rendering else "OFF"
+                backface_state = "ON" if get_backface_rendering() else "OFF"
                 deps_state = "ON" if self.use_depsgraph else "OFF"
-                preview_cull_state = "ON" if context.scene.cursor_bbox_preview_culling else "OFF"
+                preview_cull_state = "ON" if get_preview_culling() else "OFF"
                 
                 context.area.header_text_set(
                  f"Space: Create BBox{marking_status} | LMB: Mark/Place | D: Depsgraph ({deps_state}) | P: Backfaces ({backface_state}) | O: Preview Cull ({preview_cull_state}) | Alt+Scroll: Edge | Shift+Scroll: Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | 1-7: Angle Presets | "
@@ -298,16 +413,17 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             # Create bounding box based on marked faces and/or points
             if self.marked_faces or self.marked_points:
                 # Create bbox from marked faces and points
-                cursor_aligned_bounding_box(self.push_value, marked_faces=self.marked_faces, marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                if create_bounding_box_from_marked(self.marked_faces, self.marked_points, self.push_value, select_new_object=False, use_depsgraph=self.use_depsgraph):
+                    self.report({'INFO'}, "Created Bounding Box. Ready for new selection.")
+                    # Cleanup (partial) - Keep tool active
+                    clear_all_markings()
+                    clear_preview_faces()
+                    self.marked_faces.clear()
+                    self.marked_points.clear()
+                    context.area.tag_redraw()
+                else:
+                    self.report({'WARNING'}, "Failed to create Bounding Box")
                 
-                # Cleanup (partial) - Keep tool active
-                clear_all_markings()
-                clear_preview_faces()
-                self.marked_faces.clear()
-                self.marked_points.clear()
-                context.area.tag_redraw()
-                
-                self.report({'INFO'}, "Created Bounding Box. Ready for new selection.")
                 return {'RUNNING_MODAL'}
             else:
                 # If nothing marked, maybe create on object under cursor? Or do nothing?
@@ -669,15 +785,21 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 active_obj = context.active_object
                 # Switch to Object Mode to allow object creation and selection operations
                 bpy.ops.object.mode_set(mode='OBJECT')
-                cursor_aligned_bounding_box(self.push_value, marked_faces=self.marked_faces, marked_points=self.marked_points)
-                
-                # Restore Edit Mode
-                if active_obj:
-                    context.view_layer.objects.active = active_obj
-                    bpy.ops.object.mode_set(mode='EDIT')
-                    
-                self.report({'INFO'}, "Created Bounding Box from selection")
-                return {'FINISHED'}
+                if create_bounding_box_from_marked(self.marked_faces, self.marked_points, self.push_value, select_new_object=False):
+                    # Restore Edit Mode
+                    if active_obj:
+                        context.view_layer.objects.active = active_obj
+                        bpy.ops.object.mode_set(mode='EDIT')
+                        
+                    self.report({'INFO'}, "Created Bounding Box from selection")
+                    return {'FINISHED'}
+                else:
+                    self.report({'WARNING'}, "Failed to create Bounding Box from selection")
+                    # Restore Edit Mode even on failure
+                    if active_obj:
+                        context.view_layer.objects.active = active_obj
+                        bpy.ops.object.mode_set(mode='EDIT')
+                    return {'CANCELLED'}
 
         if context.area.type == 'VIEW_3D':
             self.current_edge_index = 0

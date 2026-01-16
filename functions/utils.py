@@ -312,7 +312,9 @@ def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=T
             prefs = get_preferences()
             if preview and prefs and prefs.bbox_preview_enabled:
                 push_value = getattr(context.scene, 'cursor_bbox_push', 0.01)
-                update_bbox_preview(face_data['object'], push_value, cursor.location, cursor.rotation_euler)
+                # Use the rotation matrix we just calculated, converted to Euler XYZ
+                cursor_rotation_euler = rotation_matrix.to_euler('XYZ')
+                update_bbox_preview(face_data['object'], push_value, cursor.location, cursor_rotation_euler)
         except:
             pass
     
@@ -1467,3 +1469,182 @@ def get_faces_to_process(obj, face_idx, use_coplanar, coplanar_angle_rad, use_de
         return coplanar_indices if coplanar_indices else {face_idx}
     else:
         return {face_idx}
+
+# ===== MESH EVALUATION UTILITIES =====
+
+def get_evaluated_mesh(obj, use_depsgraph=False, context=None):
+    """
+    Get mesh data from object, optionally using depsgraph evaluation.
+    
+    Args:
+        obj: Blender object to get mesh from
+        use_depsgraph: Whether to use depsgraph evaluation
+        context: Blender context (optional, uses bpy.context if not provided)
+        
+    Returns:
+        tuple: (mesh, obj_matrix_world) where mesh is the mesh data and obj_matrix_world is the object's world matrix
+    """
+    if context is None:
+        context = bpy.context
+    
+    if use_depsgraph:
+        try:
+            depsgraph = context.view_layer.depsgraph
+            eval_obj = obj.evaluated_get(depsgraph)
+            mesh = eval_obj.data
+        except:
+            mesh = obj.data
+    else:
+        mesh = obj.data
+    
+    obj_matrix_world = obj.matrix_world
+    return mesh, obj_matrix_world
+
+def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, context=None):
+    """
+    Collect all world-space vertices from marked faces dictionary.
+    
+    Args:
+        marked_faces_dict: Dictionary mapping objects to sets of face indices
+        use_depsgraph: Whether to use depsgraph evaluation
+        context: Blender context (optional, uses bpy.context if not provided)
+        
+    Returns:
+        list: List of Vector objects representing world-space vertex positions
+    """
+    if context is None:
+        context = bpy.context
+    
+    all_vertices = []
+    
+    if not marked_faces_dict:
+        return all_vertices
+    
+    for obj, face_indices in marked_faces_dict.items():
+        if not face_indices or obj.type != 'MESH':
+            continue
+        
+        mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+        
+        # Collect vertices from all marked faces
+        for face_idx in face_indices:
+            if face_idx >= len(mesh.polygons):
+                continue
+            
+            face = mesh.polygons[face_idx]
+            all_vertices.extend([obj_matrix_world @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+    
+    return all_vertices
+
+# ===== SELECTION STATE MANAGEMENT =====
+
+class SelectionState:
+    """Context manager for preserving and restoring Blender selection state"""
+    
+    def __init__(self, context):
+        self.context = context
+        self.original_selected = list(context.selected_objects)
+        self.original_active = context.view_layer.objects.active
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.restore()
+        return False
+    
+    def restore(self):
+        """Restore the original selection state"""
+        # Restore selection
+        for obj in self.original_selected:
+            try:
+                obj.select_set(True)
+            except:
+                pass  # Object may have been deleted
+        
+        # Restore active object
+        if self.original_active:
+            try:
+                self.context.view_layer.objects.active = self.original_active
+            except:
+                pass  # Object may have been deleted
+    
+    def deselect_all(self):
+        """Deselect all objects"""
+        bpy.ops.object.select_all(action='DESELECT')
+
+def preserve_selection_state(context):
+    """
+    Create a context manager for preserving selection state.
+    
+    Usage:
+        with preserve_selection_state(context) as state:
+            state.deselect_all()
+            # ... do operations ...
+        # Selection is automatically restored
+    
+    Args:
+        context: Blender context
+        
+    Returns:
+        SelectionState: Context manager instance
+    """
+    return SelectionState(context)
+
+# ===== OBJECT SETUP UTILITIES =====
+
+def move_object_to_cbb_collection(context, obj):
+    """
+    Move an object to the CBB collection, unlinking from all other collections.
+    
+    Args:
+        context: Blender context
+        obj: Object to move
+    """
+    cbb_coll = ensure_cbb_collection(context)
+    
+    # Unlink from all existing collections
+    for coll in list(obj.users_collection):
+        coll.objects.unlink(obj)
+    
+    # Link to CBB collection
+    cbb_coll.objects.link(obj)
+
+def setup_new_object(context, obj, assign_styles=True, move_to_collection=True):
+    """
+    Set up a newly created object with collection, styles, and common properties.
+    
+    Args:
+        context: Blender context
+        obj: Object to set up
+        assign_styles: Whether to assign material and color styles
+        move_to_collection: Whether to move object to CBB collection
+    """
+    if move_to_collection:
+        move_object_to_cbb_collection(context, obj)
+    
+    if assign_styles:
+        assign_object_styles(context, obj)
+
+def restore_selection_state(context, original_selected, original_active):
+    """
+    Restore selection state from saved values.
+    
+    Args:
+        context: Blender context
+        original_selected: List of originally selected objects
+        original_active: Originally active object
+    """
+    # Restore selection
+    for obj in original_selected:
+        try:
+            obj.select_set(True)
+        except:
+            pass  # Object may have been deleted
+    
+    # Restore active object
+    if original_active:
+        try:
+            context.view_layer.objects.active = original_active
+        except:
+            pass  # Object may have been deleted

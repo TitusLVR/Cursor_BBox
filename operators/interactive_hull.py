@@ -54,35 +54,16 @@ from ..functions.core import (
 
 def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False):
     """Create a convex hull from marked faces and points"""
+    from ..functions.utils import collect_vertices_from_marked_faces
+    
     context = bpy.context
-    all_vertices = []
     
     # Store explicit reference to the original active object and selected objects
     original_active = context.view_layer.objects.active
     original_selected = list(context.selected_objects)
     
-    # Collect vertices from marked faces
-    if marked_faces_dict:
-        for obj, face_indices in marked_faces_dict.items():
-            if not face_indices or obj.type != 'MESH':
-                continue
-            
-            if use_depsgraph:
-                try:
-                    eval_obj = obj.evaluated_get(context.view_layer.depsgraph)
-                    mesh = eval_obj.data
-                except:
-                    mesh = obj.data
-            else:
-                mesh = obj.data
-            
-            obj_mat_world = obj.matrix_world
-            
-            for face_idx in face_indices:
-                if face_idx < len(mesh.polygons):
-                    face = mesh.polygons[face_idx]
-                    all_vertices.extend([obj_mat_world @ mesh.vertices[vert_idx].co 
-                                       for vert_idx in face.vertices])
+    # Collect vertices from marked faces using shared utility
+    all_vertices = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph, context=context)
     
     # Add marked points
     if marked_points:
@@ -159,29 +140,22 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         # Set location to calculated center
         obj.location = center_of_geometry
         
-        cbb_coll = ensure_cbb_collection(context)
-        cbb_coll.objects.link(obj)
-        
-        # Assign Styles
-        assign_object_styles(context, obj)
+        # Set up object (collection, styles)
+        from ..functions.utils import setup_new_object, restore_selection_state
+        setup_new_object(context, obj, assign_styles=True, move_to_collection=True)
         
         # Handle Selection
         for o in context.selected_objects:
             o.select_set(False)
             
-        for o in original_selected:
-            try:
-                o.select_set(True)
-            except:
-                pass
-                
         if select_new_object:
             obj.select_set(True)
             context.view_layer.objects.active = obj
         else:
             obj.select_set(False)
-            if original_active:
-                context.view_layer.objects.active = original_active
+        
+        # Restore original selection state
+        restore_selection_state(context, original_selected, original_active)
         
         return True
         

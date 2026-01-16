@@ -2,6 +2,11 @@ import bpy
 from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element
 from ..functions.core import (
     cursor_aligned_bounding_box,
+    world_oriented_bounding_box,
+    local_oriented_bounding_box,
+    update_world_oriented_bbox_preview,
+    update_local_oriented_bbox_preview,
+    update_bbox_preview,
     enable_edge_highlight_wrapper as enable_edge_highlight,
     disable_edge_highlight_wrapper as disable_edge_highlight,
     enable_bbox_preview_wrapper as enable_bbox_preview,
@@ -32,10 +37,19 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
     
     current_edge_index: bpy.props.IntProperty(default=0)
     current_face_data = None
+    use_depsgraph = False
+    bbox_mode = None  # None, 'world', 'local', 'cursor'
+    preview_target_obj = None
     
     def modal(self, context, event):
         # Update status bar with modal controls
-        context.area.header_text_set("LMB: Place Cursor & Create BBox | Scroll: Select Edge | S: Snap to Face Element | C: Create BBox | RMB/ESC: Cancel")
+        deps_state = "ON" if self.use_depsgraph else "OFF"
+        mode_text = ""
+        if self.bbox_mode == 'world':
+            mode_text = " [World Preview]"
+        elif self.bbox_mode == 'local':
+            mode_text = " [Local Preview]"
+        context.area.header_text_set(f"LMB: Place Cursor & Create BBox | Alt+Scroll: Select Edge | S: Snap | C: Create BBox | W: World Preview | Q: Local Preview | D: Depsgraph ({deps_state}){mode_text} | Space: Create/Finish | RMB/ESC: Cancel")
         
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
@@ -44,12 +58,15 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             return {'PASS_THROUGH'}
         if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and (event.ctrl or event.shift):
             return {'PASS_THROUGH'}
+        # Allow scroll for navigation (without modifiers)
+        if event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not event.alt and not event.ctrl and not event.shift:
+            return {'PASS_THROUGH'}
         
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False)
+            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
             
             if result['success']:
-                cursor_aligned_bounding_box(self.push_value, result['object'])
+                cursor_aligned_bounding_box(self.push_value, result['object'], use_depsgraph=self.use_depsgraph)
                 self.report({'INFO'}, f"Cursor placed on {result['object'].name} and bounding box created")
             else:
                 self.report({'WARNING'}, "No surface hit")
@@ -58,51 +75,59 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
         
         elif event.type == 'C' and event.value == 'PRESS':
             # Create bounding box with current cursor settings
-            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False)
+            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
             
             if result['success']:
-                cursor_aligned_bounding_box(self.push_value, result['object'])
+                cursor_aligned_bounding_box(self.push_value, result['object'], use_depsgraph=self.use_depsgraph)
                 self.report({'INFO'}, f"Bounding box created for {result['object'].name}")
             else:
                 self.report({'WARNING'}, "No surface hit")
             
             return {'RUNNING_MODAL'}  # Continue modal
         
-        elif event.type == 'WHEELUPMOUSE' and not event.shift and not event.ctrl:
-            face_data = get_face_edges_from_raycast(context, event)
+        elif event.type == 'WHEELUPMOUSE' and event.alt:
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data:
                 self.current_face_data = face_data
                 self.current_edge_index = select_edge_by_scroll(
                     face_data, 1, self.current_edge_index
                 )
-                result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=True)
+                result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=True, use_depsgraph=self.use_depsgraph)
                 if result['success']:
                     context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
-        elif event.type == 'WHEELDOWNMOUSE' and not event.shift and not event.ctrl:
-            face_data = get_face_edges_from_raycast(context, event)
+        elif event.type == 'WHEELDOWNMOUSE' and event.alt:
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data:
                 self.current_face_data = face_data
                 self.current_edge_index = select_edge_by_scroll(
                     face_data, -1, self.current_edge_index
                 )
-                result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=True)
+                result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=True, use_depsgraph=self.use_depsgraph)
                 if result['success']:
                     context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
         elif event.type == 'MOUSEMOVE':
-            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=True)
+            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=True, use_depsgraph=self.use_depsgraph)
             if result['success']:
                 self.current_face_data = result['face_data']
+            
+            # Update preview based on current mode (even if raycast failed, if we have a target)
+            if self.bbox_mode == 'world' and self.preview_target_obj:
+                update_world_oriented_bbox_preview(self.preview_target_obj, self.push_value, self.use_depsgraph)
                 context.area.tag_redraw()
+            elif self.bbox_mode == 'local' and self.preview_target_obj:
+                update_local_oriented_bbox_preview(self.preview_target_obj, self.push_value, self.use_depsgraph)
+                context.area.tag_redraw()
+            
             return {'RUNNING_MODAL'}
         
         elif event.type == 'S' and event.value == 'PRESS':
             # Snap cursor to closest vertex, edge midpoint, or face center from current face
-            face_data = get_face_edges_from_raycast(context, event)
-            result = snap_cursor_to_closest_element(context, event, face_data)
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+            result = snap_cursor_to_closest_element(context, event, face_data, use_depsgraph=self.use_depsgraph)
             if result['success']:
                 if face_data:
                     self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
@@ -113,17 +138,118 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
                 self.report({'WARNING'}, "No suitable snap target found")
             return {'RUNNING_MODAL'}
         
+        # Toggle Depsgraph (D)
+        elif event.type == 'D' and event.value == 'PRESS':
+            self.use_depsgraph = not self.use_depsgraph
+            self.report({'INFO'}, f"Depsgraph: {'ON' if self.use_depsgraph else 'OFF'}")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+        
+        # World Oriented Preview Toggle (W)
+        elif event.type == 'W' and event.value == 'PRESS':
+            # Toggle off if already in world mode
+            if self.bbox_mode == 'world':
+                self.bbox_mode = None
+                self.preview_target_obj = None
+                # Clear preview
+                from ..functions.core import _state
+                _state.current_bbox_data = None
+                self.report({'INFO'}, "World-oriented preview OFF")
+                context.area.tag_redraw()
+            else:
+                # Toggle on - use existing target if available, otherwise get new one
+                if self.preview_target_obj and self.bbox_mode:
+                    # Switch mode using existing target
+                    self.bbox_mode = 'world'
+                    update_world_oriented_bbox_preview(self.preview_target_obj, self.push_value, self.use_depsgraph)
+                    self.report({'INFO'}, f"World-oriented preview ON for {self.preview_target_obj.name} (Press Space to create)")
+                    context.area.tag_redraw()
+                else:
+                    # Get new target object
+                    result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
+                    
+                    if result['success']:
+                        self.bbox_mode = 'world'
+                        self.preview_target_obj = result['object']
+                        update_world_oriented_bbox_preview(result['object'], self.push_value, self.use_depsgraph)
+                        self.report({'INFO'}, f"World-oriented preview ON for {result['object'].name} (Press Space to create)")
+                        context.area.tag_redraw()
+                    else:
+                        self.report({'WARNING'}, "No surface hit - cannot enable preview")
+            
+            return {'RUNNING_MODAL'}
+        
+        # Local Oriented Preview Toggle (Q)
+        elif event.type == 'Q' and event.value == 'PRESS':
+            # Toggle off if already in local mode
+            if self.bbox_mode == 'local':
+                self.bbox_mode = None
+                self.preview_target_obj = None
+                # Clear preview
+                from ..functions.core import _state
+                _state.current_bbox_data = None
+                self.report({'INFO'}, "Local-oriented preview OFF")
+                context.area.tag_redraw()
+            else:
+                # Toggle on - use existing target if available, otherwise get new one
+                if self.preview_target_obj and self.bbox_mode:
+                    # Switch mode using existing target
+                    self.bbox_mode = 'local'
+                    update_local_oriented_bbox_preview(self.preview_target_obj, self.push_value, self.use_depsgraph)
+                    self.report({'INFO'}, f"Local-oriented preview ON for {self.preview_target_obj.name} (Press Space to create)")
+                    context.area.tag_redraw()
+                else:
+                    # Get new target object
+                    result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
+                    
+                    if result['success']:
+                        self.bbox_mode = 'local'
+                        self.preview_target_obj = result['object']
+                        update_local_oriented_bbox_preview(result['object'], self.push_value, self.use_depsgraph)
+                        self.report({'INFO'}, f"Local-oriented preview ON for {result['object'].name} (Press Space to create)")
+                        context.area.tag_redraw()
+                    else:
+                        self.report({'WARNING'}, "No surface hit - cannot enable preview")
+            
+            return {'RUNNING_MODAL'}
+        
+        # Create/Finish operator (Space)
+        elif event.type == 'SPACE' and event.value == 'PRESS':
+            # If we have a preview mode active, create the bounding box
+            if self.bbox_mode == 'world' and self.preview_target_obj:
+                world_oriented_bounding_box(self.push_value, self.preview_target_obj, use_depsgraph=self.use_depsgraph)
+                self.report({'INFO'}, f"World-oriented bounding box created for {self.preview_target_obj.name}")
+                self.bbox_mode = None
+                self.preview_target_obj = None
+                return {'RUNNING_MODAL'}  # Continue modal
+            elif self.bbox_mode == 'local' and self.preview_target_obj:
+                local_oriented_bounding_box(self.push_value, self.preview_target_obj, use_depsgraph=self.use_depsgraph)
+                self.report({'INFO'}, f"Local-oriented bounding box created for {self.preview_target_obj.name}")
+                self.bbox_mode = None
+                self.preview_target_obj = None
+                return {'RUNNING_MODAL'}  # Continue modal
+            else:
+                # No preview active, finish operator
+                disable_edge_highlight()
+                disable_bbox_preview()
+                context.area.header_text_set(None)  # Clear status bar
+                return {'FINISHED'}
+        
         elif event.type == 'ESC':
+            self.bbox_mode = None
+            self.preview_target_obj = None
             disable_edge_highlight()
             disable_bbox_preview()
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
 
         elif event.type == 'RIGHTMOUSE':
+            self.bbox_mode = None
+            self.preview_target_obj = None
             disable_edge_highlight()
             disable_bbox_preview()
             context.area.header_text_set(None)  # Clear status bar
-            return {'FINISHED'}
+            return {'CANCELLED'}
         
         return {'RUNNING_MODAL'}
     
@@ -131,6 +257,8 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
         if context.area.type == 'VIEW_3D':
             self.current_edge_index = 0
             self.current_face_data = None
+            self.bbox_mode = None
+            self.preview_target_obj = None
             enable_edge_highlight()
             enable_bbox_preview()
             context.window_manager.modal_handler_add(self)

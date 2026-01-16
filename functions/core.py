@@ -133,6 +133,7 @@ def get_marked_points_info():
 def mark_faces_batch(obj, face_indices, use_depsgraph=False):
     """Efficiently mark multiple faces at once, optionally using evaluated mesh"""
     global _state
+    from .utils import get_evaluated_mesh
     
     if obj.type != 'MESH':
         return
@@ -151,22 +152,8 @@ def mark_faces_batch(obj, face_indices, use_depsgraph=False):
     
     vertices = []
     
-    if use_depsgraph:
-        depsgraph = bpy.context.view_layer.depsgraph
-        try:
-            eval_obj = obj.evaluated_get(depsgraph)
-            mesh = eval_obj.data
-            # Note: Do not use obj.matrix_world if vertices are already in world space from eval?
-            # Actually, eval mesh verts are usually in local space of object, 
-            # but modifiers might change that? Usually still local.
-            # But raycast returns EVAL geometry indices.
-            obj_mat = obj.matrix_world # Use original object matrix
-        except:
-            mesh = obj.data
-            obj_mat = obj.matrix_world
-    else:
-        mesh = obj.data
-        obj_mat = obj.matrix_world
+    # Get evaluated mesh using shared utility
+    mesh, obj_mat = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph)
     
     # Process all faces in one pass
     for face_idx in face_indices:
@@ -297,6 +284,7 @@ def force_refresh_marked_faces():
 def update_preview_faces(obj, face_indices, use_depsgraph=False):
     """Update faces preview (transient highlight)"""
     global _state
+    from .utils import get_evaluated_mesh
     
     # Clear previous preview
     _state.preview_faces_visual_cache.clear()
@@ -307,18 +295,8 @@ def update_preview_faces(obj, face_indices, use_depsgraph=False):
         
     vertices = []
     
-    if use_depsgraph:
-        depsgraph = bpy.context.view_layer.depsgraph
-        try:
-            eval_obj = obj.evaluated_get(depsgraph)
-            mesh = eval_obj.data
-            obj_mat = obj.matrix_world
-        except:
-            mesh = obj.data
-            obj_mat = obj.matrix_world
-    else:
-        mesh = obj.data
-        obj_mat = obj.matrix_world
+    # Get evaluated mesh using shared utility
+    mesh, obj_mat = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph)
     
     # Process faces
     for face_idx in face_indices:
@@ -444,33 +422,11 @@ def calculate_bbox_bounds_optimized(world_coords, cursor_location, cursor_rotati
 def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cursor_rotation, marked_points=None, use_depsgraph=False):
     """Optimized marked faces bbox update with proper cache handling"""
     global _state
+    from .utils import collect_vertices_from_marked_faces
     
     try:
-        all_vertices = []
-
-        # Collect vertices from marked faces
-        for obj, face_indices in marked_faces_dict.items():
-            if not face_indices or obj.type != 'MESH':
-                continue
-
-            if use_depsgraph:
-                try:
-                    eval_obj = obj.evaluated_get(bpy.context.view_layer.depsgraph)
-                    mesh = eval_obj.data
-                except:
-                    mesh = obj.data
-            else:
-                mesh = obj.data
-
-            obj_mat = obj.matrix_world
-
-            # Batch process face vertices
-            for face_idx in face_indices:
-                if face_idx >= len(mesh.polygons):
-                    continue
-
-                face = mesh.polygons[face_idx]
-                all_vertices.extend([obj_mat @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+        # Collect vertices from marked faces using shared utility
+        all_vertices = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph)
 
         # Add marked points
         if marked_points:
@@ -533,33 +489,11 @@ def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cur
 def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points=None, use_depsgraph=False):
     """Update preview with convex hull of marked faces/points"""
     global _state
+    from .utils import collect_vertices_from_marked_faces
     
     try:
-        all_vertices = []
-
-        # Collect vertices from marked faces
-        for obj, face_indices in marked_faces_dict.items():
-            if not face_indices or obj.type != 'MESH':
-                continue
-
-            if use_depsgraph:
-                try:
-                    eval_obj = obj.evaluated_get(bpy.context.view_layer.depsgraph)
-                    mesh = eval_obj.data
-                except:
-                    mesh = obj.data
-            else:
-                mesh = obj.data
-
-            obj_mat = obj.matrix_world
-
-            # Batch process face vertices
-            for face_idx in face_indices:
-                if face_idx >= len(mesh.polygons):
-                    continue
-
-                face = mesh.polygons[face_idx]
-                all_vertices.extend([obj_mat @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+        # Collect vertices from marked faces using shared utility
+        all_vertices = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph)
 
         # Add marked points
         if marked_points:
@@ -645,33 +579,11 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
 def update_marked_faces_sphere(marked_faces_dict, cursor_location, cursor_rotation, marked_points=None, use_depsgraph=False):
     """Update preview with bounding sphere of marked faces/points (Cursor Aligned)"""
     global _state
+    from .utils import collect_vertices_from_marked_faces
     
     try:
-        all_vertices = []
-
-        # Collect vertices from marked faces
-        for obj, face_indices in marked_faces_dict.items():
-            if not face_indices or obj.type != 'MESH':
-                continue
-
-            if use_depsgraph:
-                try:
-                    eval_obj = obj.evaluated_get(bpy.context.view_layer.depsgraph)
-                    mesh = eval_obj.data
-                except:
-                    mesh = obj.data
-            else:
-                mesh = obj.data
-
-            obj_mat = obj.matrix_world
-
-            # Batch process face vertices
-            for face_idx in face_indices:
-                if face_idx >= len(mesh.polygons):
-                    continue
-
-                face = mesh.polygons[face_idx]
-                all_vertices.extend([obj_mat @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+        # Collect vertices from marked faces using shared utility
+        all_vertices = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph)
 
         # Add marked points
         if marked_points:
@@ -907,27 +819,10 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
     try:
         # Handle marked faces or points
         if marked_faces or marked_points:
-            all_world_coords = []
+            from .utils import collect_vertices_from_marked_faces
             
-            if marked_faces:
-                for obj, face_indices in marked_faces.items():
-                    if use_depsgraph:
-                        try:
-                            eval_obj = obj.evaluated_get(context.view_layer.depsgraph)
-                            mesh = eval_obj.data
-                        except:
-                            mesh = obj.data
-                    else:
-                        mesh = obj.data
-                    obj_mat_world = obj.matrix_world
-                    
-                    for face_idx in face_indices:
-                        if face_idx < len(mesh.polygons):
-                            face = mesh.polygons[face_idx]
-                            all_world_coords.extend([
-                                obj_mat_world @ mesh.vertices[vert_idx].co 
-                                for vert_idx in face.vertices
-                            ])
+            # Collect vertices from marked faces using shared utility
+            all_world_coords = collect_vertices_from_marked_faces(marked_faces, use_depsgraph=use_depsgraph, context=context)
             
             if marked_points:
                 all_world_coords.extend(marked_points)
@@ -962,42 +857,30 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
             world_center = cursor_location + (cursor_rot_mat @ local_center)
             
             # Create bbox object
-            original_selected = list(context.selected_objects)
-            original_active = context.view_layer.objects.active
+            from .utils import preserve_selection_state, setup_new_object
             
-            bpy.ops.object.select_all(action='DESELECT')
-            
-            bpy.ops.mesh.primitive_cube_add(
-                size=1,
-                enter_editmode=False,
-                align='WORLD',
-                location=world_center,
-                rotation=cursor_rotation
-            )
-            
-            bbox_obj = context.active_object
-            bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
-            
-            # Move to CBB_Collision collection
-            cbb_coll = ensure_cbb_collection(context)
-            for coll in bbox_obj.users_collection:
-                coll.objects.unlink(bbox_obj)
-            cbb_coll.objects.link(bbox_obj)
-            
-            # Assign Styles
-            assign_object_styles(context, bbox_obj)
+            with preserve_selection_state(context) as state:
+                state.deselect_all()
+                
+                bpy.ops.mesh.primitive_cube_add(
+                    size=1,
+                    enter_editmode=False,
+                    align='WORLD',
+                    location=world_center,
+                    rotation=cursor_rotation
+                )
+                
+                bbox_obj = context.active_object
+                bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
+                
+                # Set up object (collection, styles)
+                setup_new_object(context, bbox_obj, assign_styles=True, move_to_collection=True)
 
-            bbox_obj.scale = dimensions
-            bbox_obj.show_wire = show_wire
-            bbox_obj.show_all_edges = show_all_edges
-            
-            bbox_obj.select_set(False)
-            
-            # Restore selection
-            for obj in original_selected:
-                obj.select_set(True)
-            if original_active:
-                context.view_layer.objects.active = original_active
+                bbox_obj.scale = dimensions
+                bbox_obj.show_wire = show_wire
+                bbox_obj.show_all_edges = show_all_edges
+                
+                bbox_obj.select_set(False)
         
         else:
             # Handle target object or selected objects
@@ -1078,11 +961,10 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
                     bbox_obj = context.active_object
                     bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
 
-                    # Move to CBB_Collision collection
-                    cbb_coll = ensure_cbb_collection(context)
-                    for coll in bbox_obj.users_collection:
-                        coll.objects.unlink(bbox_obj)
-                    cbb_coll.objects.link(bbox_obj)
+                    # Set up object (collection, styles)
+                    from .utils import setup_new_object
+                    setup_new_object(context, bbox_obj, assign_styles=False, move_to_collection=True)
+                    
                     bbox_obj.scale = dimensions
                     bbox_obj.show_wire = show_wire
                     bbox_obj.show_all_edges = show_all_edges
@@ -1143,46 +1025,145 @@ def cursor_aligned_bounding_box(push_value, target_obj=None, marked_faces=None, 
 
                     world_center = cursor_location + (cursor_rot_mat @ local_center)
 
-                    bpy.ops.object.select_all(action='DESELECT')
-
-                    bpy.ops.mesh.primitive_cube_add(
-                        size=1,
-                        enter_editmode=False,
-                        align='WORLD',
-                        location=world_center,
-                        rotation=cursor_rotation
-                    )
-
-                    bbox_obj = context.active_object
-                    bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
-
-                    # Move to CBB_Collision collection
-                    cbb_coll = ensure_cbb_collection(context)
-                    for coll in bbox_obj.users_collection:
-                        coll.objects.unlink(bbox_obj)
-                    cbb_coll.objects.link(bbox_obj)
+                    from .utils import preserve_selection_state, setup_new_object
                     
-                    # Assign Styles
-                    assign_object_styles(context, bbox_obj)
+                    with preserve_selection_state(context) as state:
+                        state.deselect_all()
+                        
+                        bpy.ops.mesh.primitive_cube_add(
+                            size=1,
+                            enter_editmode=False,
+                            align='WORLD',
+                            location=world_center,
+                            rotation=cursor_rotation
+                        )
 
-                    bbox_obj.scale = dimensions
-                    bbox_obj.show_wire = show_wire
-                    bbox_obj.show_all_edges = show_all_edges
+                        bbox_obj = context.active_object
+                        bbox_obj.name = context.scene.cursor_bbox_name_box if context.scene.cursor_bbox_name_box else "Cube"
 
-                    bbox_obj.select_set(False)
+                        # Set up object (collection, styles)
+                        setup_new_object(context, bbox_obj, assign_styles=True, move_to_collection=True)
 
-                    # Restore selection
-                    for sel_obj in original_selected:
-                        if sel_obj.name in [o.name for o in mesh_objects]:
-                            sel_obj.select_set(True)
+                        bbox_obj.scale = dimensions
+                        bbox_obj.show_wire = show_wire
+                        bbox_obj.show_all_edges = show_all_edges
 
-                    if original_active and original_active in mesh_objects:
-                        context.view_layer.objects.active = original_active
-                    elif mesh_objects:
-                        context.view_layer.objects.active = mesh_objects[0]
+                        bbox_obj.select_set(False)
+                        
+                        # Restore selection for mesh objects
+                        for sel_obj in original_selected:
+                            if sel_obj.name in [o.name for o in mesh_objects]:
+                                sel_obj.select_set(True)
+
+                        if original_active and original_active in mesh_objects:
+                            context.view_layer.objects.active = original_active
+                        elif mesh_objects:
+                            context.view_layer.objects.active = mesh_objects[0]
 
     finally:
         context.scene.cursor.rotation_mode = cursor_rotation_mode
+
+def world_oriented_bounding_box(push_value, target_obj=None, marked_faces=None, marked_points=None, use_depsgraph=False):
+    """Create a bounding box aligned to world axes (no rotation)"""
+    context = bpy.context
+    cursor = context.scene.cursor
+    
+    # Save current cursor rotation
+    cursor_rotation_mode = cursor.rotation_mode
+    if cursor.rotation_mode == 'QUATERNION':
+        saved_rotation = cursor.rotation_quaternion.copy()
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        saved_rotation = cursor.rotation_axis_angle.copy()
+    else:
+        saved_rotation = cursor.rotation_euler.copy()
+    
+    # Set cursor rotation to zero (world axes)
+    cursor.rotation_mode = 'XYZ'
+    cursor.rotation_euler = (0.0, 0.0, 0.0)
+    
+    try:
+        # Create bounding box with world orientation
+        cursor_aligned_bounding_box(push_value, target_obj, marked_faces, marked_points, use_depsgraph)
+    finally:
+        # Restore cursor rotation
+        cursor.rotation_mode = cursor_rotation_mode
+        if cursor_rotation_mode == 'QUATERNION':
+            cursor.rotation_quaternion = saved_rotation
+        elif cursor_rotation_mode == 'AXIS_ANGLE':
+            cursor.rotation_axis_angle = saved_rotation
+        else:
+            cursor.rotation_euler = saved_rotation
+
+def get_object_rotation_euler(obj):
+    """Get object's world rotation as Euler XYZ, handling all rotation modes"""
+    # Use matrix_world to get the object's actual world rotation
+    # This accounts for parent transforms and gives the true orientation
+    rot_mat = obj.matrix_world.to_3x3()
+    return rot_mat.to_euler('XYZ')
+
+def update_world_oriented_bbox_preview(target_obj, push_value, use_depsgraph=False):
+    """Update preview with world-oriented bounding box (zero rotation)"""
+    from mathutils import Euler
+    context = bpy.context
+    cursor = context.scene.cursor
+    
+    # Use zero rotation for world orientation
+    world_rotation = Euler((0.0, 0.0, 0.0), 'XYZ')
+    update_bbox_preview(target_obj, push_value, cursor.location, world_rotation)
+
+def update_local_oriented_bbox_preview(target_obj, push_value, use_depsgraph=False):
+    """Update preview with local-oriented bounding box (object's rotation)"""
+    context = bpy.context
+    cursor = context.scene.cursor
+    
+    if not target_obj or target_obj.type != 'MESH':
+        return
+    
+    # Get object's local rotation
+    obj_rotation = get_object_rotation_euler(target_obj)
+    update_bbox_preview(target_obj, push_value, cursor.location, obj_rotation)
+
+def local_oriented_bounding_box(push_value, target_obj=None, marked_faces=None, marked_points=None, use_depsgraph=False):
+    """Create a bounding box aligned to the object's local coordinate system"""
+    context = bpy.context
+    cursor = context.scene.cursor
+    
+    # Determine target object
+    obj = target_obj if target_obj else context.active_object
+    
+    if not obj or obj.type != 'MESH':
+        # If no object, fall back to cursor-aligned
+        cursor_aligned_bounding_box(push_value, target_obj, marked_faces, marked_points, use_depsgraph)
+        return
+    
+    # Get object's local rotation
+    obj_rotation = get_object_rotation_euler(obj)
+    
+    # Save current cursor rotation
+    cursor_rotation_mode = cursor.rotation_mode
+    if cursor.rotation_mode == 'QUATERNION':
+        saved_rotation = cursor.rotation_quaternion.copy()
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        saved_rotation = cursor.rotation_axis_angle.copy()
+    else:
+        saved_rotation = cursor.rotation_euler.copy()
+    
+    # Set cursor rotation to object's rotation
+    cursor.rotation_mode = 'XYZ'
+    cursor.rotation_euler = obj_rotation
+    
+    try:
+        # Create bounding box with object's local orientation
+        cursor_aligned_bounding_box(push_value, target_obj, marked_faces, marked_points, use_depsgraph)
+    finally:
+        # Restore cursor rotation
+        cursor.rotation_mode = cursor_rotation_mode
+        if cursor_rotation_mode == 'QUATERNION':
+            cursor.rotation_quaternion = saved_rotation
+        elif cursor_rotation_mode == 'AXIS_ANGLE':
+            cursor.rotation_axis_angle = saved_rotation
+        else:
+            cursor.rotation_euler = saved_rotation
 
 # ===== CLEANUP FUNCTION =====
 
