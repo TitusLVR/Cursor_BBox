@@ -1648,3 +1648,166 @@ def restore_selection_state(context, original_selected, original_active):
             context.view_layer.objects.active = original_active
         except:
             pass  # Object may have been deleted
+
+# ===== COLLECTION INSTANCE / LINKED ASSET HANDLING =====
+
+def is_collection_instance(obj):
+    """
+    Check if an object is a collection instance.
+    
+    Args:
+        obj: Object to check
+        
+    Returns:
+        bool: True if object is a collection instance
+    """
+    return obj and hasattr(obj, 'instance_collection') and obj.instance_collection is not None
+
+def make_collection_instance_real(context, instance_obj, keep_previous_selection=False):
+    """
+    Make a collection instance real by duplicating and converting it to mesh objects.
+    Creates a temporary collection first, then duplicates the instance into it.
+    
+    Args:
+        context: Blender context
+        instance_obj: The collection instance object
+        keep_previous_selection: If True, don't deselect previously selected objects (for multiple instances)
+        
+    Returns:
+        dict: Contains 'temp_collection', 'real_objects', and 'original_object'
+              Returns None if operation fails
+    """
+    if not is_collection_instance(instance_obj):
+        return None
+    
+    # Store currently selected objects (may include real objects from previous instances)
+    previously_selected = list(context.selected_objects) if keep_previous_selection else []
+    original_active = context.view_layer.objects.active
+    
+    try:
+        # 1. Create temporary collection FIRST
+        temp_coll_name = f"_TEMP_CBB_Instance_{instance_obj.name}"
+        temp_collection = bpy.data.collections.new(temp_coll_name)
+        context.scene.collection.children.link(temp_collection)
+        
+        # 2. Deselect all (including previous real objects, we'll reselect them later)
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        
+        # 3. Select and activate the instance object
+        instance_obj.select_set(True)
+        context.view_layer.objects.active = instance_obj
+        
+        # 4. Duplicate the instance
+        bpy.ops.object.duplicate()
+        duplicated_obj = context.active_object
+        
+        # 5. Move the duplicate into temp collection immediately
+        for coll in list(duplicated_obj.users_collection):
+            coll.objects.unlink(duplicated_obj)
+        temp_collection.objects.link(duplicated_obj)
+        
+        # 6. Make the duplicated instance real with hierarchy
+        # This converts the instance to actual mesh objects
+        # All created objects will be in the temp collection
+        bpy.ops.object.duplicates_make_real(use_base_parent=True, use_hierarchy=True)
+        
+        # 7. Collect all created real objects (they're now all selected)
+        real_objects = list(context.selected_objects)
+        
+        # 8. Ensure all real objects are in temp collection and nowhere else
+        for obj in real_objects:
+            # Unlink from any other collections
+            for coll in list(obj.users_collection):
+                if coll != temp_collection:
+                    coll.objects.unlink(obj)
+            # Make sure it's in temp collection
+            if obj.name not in temp_collection.objects:
+                temp_collection.objects.link(obj)
+        
+        # 9. Re-select previously selected objects (from other instances)
+        if keep_previous_selection:
+            for obj in previously_selected:
+                try:
+                    obj.select_set(True)
+                except:
+                    pass
+        
+        # Real objects from this instance are already selected from make_real
+        # So now all real objects from all instances are selected
+        
+        # 10. Hide the original instance object
+        instance_obj.hide_set(True)
+        
+        return {
+            'temp_collection': temp_collection,
+            'real_objects': real_objects,
+            'original_object': instance_obj
+        }
+        
+    except Exception as e:
+        print(f"Error making collection instance real: {e}")
+        # Clean up temp collection if it was created
+        if 'temp_collection' in locals():
+            try:
+                context.scene.collection.children.unlink(temp_collection)
+                bpy.data.collections.remove(temp_collection)
+            except:
+                pass
+        # Restore selection even on error
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        if keep_previous_selection:
+            for obj in previously_selected:
+                try:
+                    obj.select_set(True)
+                except:
+                    pass
+        if original_active:
+            try:
+                context.view_layer.objects.active = original_active
+            except:
+                pass
+        return None
+
+def cleanup_collection_instance_temp(context, instance_data):
+    """
+    Clean up temporary collection and objects created by make_collection_instance_real.
+    Simply deletes the entire temp collection with all its contents.
+    
+    Args:
+        context: Blender context
+        instance_data: Dictionary returned by make_collection_instance_real
+    """
+    if not instance_data:
+        return
+    
+    temp_collection = instance_data.get('temp_collection')
+    original_object = instance_data.get('original_object')
+    
+    # Unhide the original instance object
+    if original_object:
+        try:
+            original_object.hide_set(False)
+        except:
+            pass
+    
+    if temp_collection:
+        try:
+            # Delete all objects in the collection
+            # This is cleaner than individually deleting each object
+            for obj in list(temp_collection.objects):
+                try:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                except:
+                    pass
+            
+            # Unlink collection from scene
+            if temp_collection.name in context.scene.collection.children:
+                context.scene.collection.children.unlink(temp_collection)
+            
+            # Remove the collection itself
+            bpy.data.collections.remove(temp_collection)
+        except Exception as e:
+            print(f"Error cleaning up temp collection: {e}")
+            pass

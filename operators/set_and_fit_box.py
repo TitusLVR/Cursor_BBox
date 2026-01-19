@@ -1,5 +1,13 @@
 import bpy
-from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element
+from ..functions.utils import (
+    get_face_edges_from_raycast, 
+    select_edge_by_scroll, 
+    place_cursor_with_raycast_and_edge, 
+    snap_cursor_to_closest_element,
+    is_collection_instance,
+    make_collection_instance_real,
+    cleanup_collection_instance_temp
+)
 from ..functions.core import (
     cursor_aligned_bounding_box,
     world_oriented_bounding_box,
@@ -40,6 +48,39 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
     use_depsgraph = False
     bbox_mode = None  # None, 'world', 'local', 'cursor'
     preview_target_obj = None
+    
+    # Collection instance handling
+    instance_data = {}  # Dictionary to store instance data per object {obj: instance_data}
+    
+    def handle_collection_instance(self, context, obj, keep_previous_selection=False):
+        """
+        Check if object is a collection instance and make it real if needed.
+        
+        Args:
+            context: Blender context
+            obj: Object to check
+            keep_previous_selection: Whether to keep previously selected objects
+            
+        Returns:
+            Object or list of objects to use for operations
+        """
+        if is_collection_instance(obj):
+            # Make instance real and store data for cleanup
+            instance_info = make_collection_instance_real(context, obj, keep_previous_selection)
+            if instance_info:
+                self.instance_data[obj] = instance_info
+                # Return the real objects for processing
+                return instance_info['real_objects']
+            else:
+                self.report({'WARNING'}, f"Failed to make instance real for {obj.name}")
+                return None
+        return [obj]
+    
+    def cleanup_all_instances(self, context):
+        """Clean up all temporary collection instances."""
+        for obj, instance_info in self.instance_data.items():
+            cleanup_collection_instance_temp(context, instance_info)
+        self.instance_data.clear()
     
     def modal(self, context, event):
         # Update status bar with modal controls
@@ -240,6 +281,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             self.preview_target_obj = None
             disable_edge_highlight()
             disable_bbox_preview()
+            self.cleanup_all_instances(context)  # Clean up collection instances
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
 
@@ -248,6 +290,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             self.preview_target_obj = None
             disable_edge_highlight()
             disable_bbox_preview()
+            self.cleanup_all_instances(context)  # Clean up collection instances
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
         
@@ -259,6 +302,19 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             self.current_face_data = None
             self.bbox_mode = None
             self.preview_target_obj = None
+            self.instance_data = {}
+            
+            # Check for collection instances in selected objects
+            selected_objects_list = list(context.selected_objects)
+            for i, obj in enumerate(selected_objects_list):
+                if is_collection_instance(obj):
+                    self.report({'INFO'}, f"Processing collection instance: {obj.name}")
+                    # Keep previous selection for all instances after the first one
+                    keep_previous = (i > 0)
+                    real_objs = self.handle_collection_instance(context, obj, keep_previous)
+                    if not real_objs:
+                        self.report({'WARNING'}, f"Failed to process instance: {obj.name}")
+            
             enable_edge_highlight()
             enable_bbox_preview()
             context.window_manager.modal_handler_add(self)

@@ -17,7 +17,10 @@ from ..functions.utils import (
     get_cursor_rotation_euler,
     get_selected_faces_from_edit_mode,
     calculate_point_location,
-    get_faces_to_process
+    get_faces_to_process,
+    is_collection_instance,
+    make_collection_instance_real,
+    cleanup_collection_instance_temp
 )
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
@@ -206,6 +209,39 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
     marked_points = []
     original_selected_objects = set()
     use_depsgraph = False
+    
+    # Collection instance handling
+    instance_data = {}  # Dictionary to store instance data per object {obj: instance_data}
+    
+    def handle_collection_instance(self, context, obj, keep_previous_selection=False):
+        """
+        Check if object is a collection instance and make it real if needed.
+        
+        Args:
+            context: Blender context
+            obj: Object to check
+            keep_previous_selection: Whether to keep previously selected objects
+            
+        Returns:
+            Object or list of objects to use for operations
+        """
+        if is_collection_instance(obj):
+            # Make instance real and store data for cleanup
+            instance_info = make_collection_instance_real(context, obj, keep_previous_selection)
+            if instance_info:
+                self.instance_data[obj] = instance_info
+                # Return the real objects for processing
+                return instance_info['real_objects']
+            else:
+                self.report({'WARNING'}, f"Failed to make instance real for {obj.name}")
+                return None
+        return [obj]
+    
+    def cleanup_all_instances(self, context):
+        """Clean up all temporary collection instances."""
+        for obj, instance_info in self.instance_data.items():
+            cleanup_collection_instance_temp(context, instance_info)
+        self.instance_data.clear()
     
     def modal(self, context, event):
         # Update status bar
@@ -606,6 +642,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             clear_preview_faces()
             clear_preview_point()
             clear_limitation_plane()
+            self.cleanup_all_instances(context)  # Clean up collection instances
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'CANCELLED'}
@@ -619,6 +656,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             clear_preview_faces()
             clear_preview_point()
             clear_limitation_plane()
+            self.cleanup_all_instances(context)  # Clean up collection instances
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'FINISHED'}
@@ -635,6 +673,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         self.snap_enabled = True
         self.limit_plane_mode = False
         self.limitation_plane_matrix = None
+        self.instance_data = {}
 
         # Check for immediate execution in Edit Mode
         if context.mode == 'EDIT_MESH':
@@ -667,6 +706,26 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             self.original_selected_objects = set(context.selected_objects)
             if context.active_object:
                 self.original_selected_objects.add(context.active_object)
+            
+            # Check for collection instances and handle them
+            objects_with_instances = []
+            for obj in self.original_selected_objects:
+                if is_collection_instance(obj):
+                    self.report({'INFO'}, f"Processing collection instance: {obj.name}")
+                    objects_with_instances.append(obj)
+            
+            # Make instances real (process all instances keeping selection)
+            for i, obj in enumerate(objects_with_instances):
+                # Keep previous selection for all instances after the first one
+                keep_previous = (i > 0)
+                real_objs = self.handle_collection_instance(context, obj, keep_previous)
+                if real_objs:
+                    # Add real objects to the set of objects we can interact with
+                    # Remove the instance object from original set
+                    self.original_selected_objects.discard(obj)
+                    # Add real objects
+                    for real_obj in real_objs:
+                        self.original_selected_objects.add(real_obj)
                 
             clear_preview_faces()
             enable_face_marking()

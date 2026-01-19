@@ -14,6 +14,7 @@ Blender addon for precise cursor placement and cursor-aligned bounding box creat
 - **Face marking system** for selective bounding
 - **Smart snapping** to vertices, edges, and face centers
 - **Real-time visual feedback** with color-coded highlights
+- **Collection instance support** - Works seamlessly with linked assets
 
 ## Installation
 
