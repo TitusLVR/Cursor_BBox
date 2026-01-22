@@ -60,7 +60,7 @@ def register():
     bpy.types.Scene.cursor_bbox_hull_dissolve_angle = bpy.props.FloatProperty(
         name="Hull Dissolve Angle",
         description="Angle threshold for dissolving planar faces in convex hull (degrees)",
-        default=5.0,
+        default=3.0,
         min=0.0,
         max=180.0,
         precision=1
