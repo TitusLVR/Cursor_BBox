@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Cursor Aligned Bounding Box",
     "author": "Titus",
-    "version": (1, 0, 7),
+    "version": (1, 0, 8),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Cursor BBox",
     "description": "Set cursor and fit bounding shapes (Box, Hull, Sphere) with face marking.",
