@@ -518,13 +518,13 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
         bm.verts.ensure_lookup_table()
         
         # Calculate hull
-        bmesh.ops.convex_hull(bm, input=bm.verts)
+        ret = bmesh.ops.convex_hull(bm, input=bm.verts)
         
-        # Remove any loose vertices that are not connected to faces
-        # After convex_hull, some vertices may not be part of any face
-        verts_to_remove = [v for v in bm.verts if not v.link_faces]
-        if verts_to_remove:
-            bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
+        # Remove interior/unused geometry from convex hull operation
+        # Use set to avoid duplicates (geom_unused is a subset of geom_interior)
+        geom_to_remove = list(set(ret.get('geom_interior', []) + ret.get('geom_unused', [])))
+        if geom_to_remove:
+            bmesh.ops.delete(bm, geom=geom_to_remove, context='VERTS')
         
         # Ensure lookup tables are valid after deletion
         bm.verts.ensure_lookup_table()
@@ -554,18 +554,7 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
             bm.edges.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
             
-            # Run convex hull again for cleaner results
-            bmesh.ops.convex_hull(bm, input=bm.verts)
-            
-            # Clean up again after second convex hull
-            verts_to_remove = [v for v in bm.verts if not v.link_faces]
-            if verts_to_remove:
-                bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
-            
-            bm.verts.ensure_lookup_table()
-            bm.edges.ensure_lookup_table()
-            bm.faces.ensure_lookup_table()
-            
+            # Recalculate normals after dissolve
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
         # Apply push value (inflate)
@@ -580,10 +569,8 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
                     normal = vert_normals[v].normalized()
                     v.co += normal * push_value
 
-        # Prepare for drawing
-        # Triangulate for face drawing
-        bmesh.ops.triangulate(bm, faces=bm.faces)
-        
+        # Prepare for drawing (n-gons and triangles will be visible in preview)
+        # Note: GPU drawing handles n-gons automatically, no need to triangulate
         face_verts = []
         for f in bm.faces:
              for v in f.verts:

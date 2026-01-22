@@ -65,6 +65,35 @@ def register():
         max=180.0,
         precision=1
     )
+    
+    bpy.types.Scene.cursor_bbox_hull_use_triangulate = bpy.props.BoolProperty(
+        name="Triangulate Hull",
+        description="Triangulate the final convex hull mesh",
+        default=True
+    )
+    
+    bpy.types.Scene.cursor_bbox_hull_triangulate_quads = bpy.props.EnumProperty(
+        name="Quad Method",
+        description="Method for triangulating quads in convex hull",
+        items=[
+            ('BEAUTY', "Beauty", "Use beauty method for quads"),
+            ('FIXED', "Fixed", "Use fixed method for quads"),
+            ('ALTERNATE', "Alternate", "Use alternate method for quads"),
+            ('SHORT_EDGE', "Short Edge", "Use shortest edge method for quads"),
+            ('LONG_EDGE', "Long Edge", "Use longest edge method for quads"),
+        ],
+        default='SHORT_EDGE'
+    )
+    
+    bpy.types.Scene.cursor_bbox_hull_triangulate_ngons = bpy.props.EnumProperty(
+        name="N-gon Method",
+        description="Method for triangulating n-gons in convex hull",
+        items=[
+            ('BEAUTY', "Beauty", "Use beauty method for n-gons"),
+            ('EAR_CLIP', "Ear Clip", "Use ear clip method for n-gons"),
+        ],
+        default='BEAUTY'
+    )
 
     def update_material_color(self, context):
         """Update material color when property changes"""
@@ -122,3 +151,6 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_material_color
     del bpy.types.Scene.cursor_bbox_use_material
     del bpy.types.Scene.cursor_bbox_hull_dissolve_angle
+    del bpy.types.Scene.cursor_bbox_hull_use_triangulate
+    del bpy.types.Scene.cursor_bbox_hull_triangulate_quads
+    del bpy.types.Scene.cursor_bbox_hull_triangulate_ngons

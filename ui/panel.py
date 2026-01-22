@@ -107,6 +107,13 @@ class CursorBBox_PT_main(bpy.types.Panel):
         row.label(text="Hull Options", icon='MESH_ICOSPHERE')
         
         col.prop(scene, 'cursor_bbox_hull_dissolve_angle', text="Dissolve Angle")
+        col.prop(scene, 'cursor_bbox_hull_use_triangulate', text="Triangulate", toggle=True)
+        
+        # Show triangulation method options only if triangulation is enabled
+        if scene.cursor_bbox_hull_use_triangulate:
+            sub = col.column(align=True)
+            sub.prop(scene, 'cursor_bbox_hull_triangulate_quads', text="Quad Method")
+            sub.prop(scene, 'cursor_bbox_hull_triangulate_ngons', text="N-gon Method")
 
         # Subtle preferences button
         row = box.row()

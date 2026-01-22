@@ -86,20 +86,21 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
     
     # Calculate convex hull
     try:
-        bmesh.ops.convex_hull(bm, input=bm.verts)
+        # First convex hull pass
+        ret = bmesh.ops.convex_hull(bm, input=bm.verts)
         
-        # Remove any loose vertices that are not connected to faces
-        # After convex_hull, some vertices may not be part of any face
-        verts_to_remove = [v for v in bm.verts if not v.link_faces]
-        if verts_to_remove:
-            bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
+        # Remove interior/unused geometry from convex hull operation
+        # Use set to avoid duplicates (geom_unused is a subset of geom_interior)
+        geom_to_remove = list(set(ret.get('geom_interior', []) + ret.get('geom_unused', [])))
+        if geom_to_remove:
+            bmesh.ops.delete(bm, geom=geom_to_remove, context='VERTS')
         
         # Ensure lookup tables are valid after deletion
         bm.verts.ensure_lookup_table()
         bm.edges.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
         
-        # Remove interior geometry and ensure normals
+        # Recalculate face normals
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
         
         # Apply dissolve_limit to clean up planar faces
@@ -121,19 +122,17 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
             bm.edges.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
             
-            # Run convex hull again for cleaner results
-            bmesh.ops.convex_hull(bm, input=bm.verts)
-            
-            # Clean up again after second convex hull
-            verts_to_remove = [v for v in bm.verts if not v.link_faces]
-            if verts_to_remove:
-                bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
-            
-            bm.verts.ensure_lookup_table()
-            bm.edges.ensure_lookup_table()
-            bm.faces.ensure_lookup_table()
-            
+            # Recalculate normals after dissolve
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        
+        # Triangulate the final mesh if enabled
+        if context.scene.cursor_bbox_hull_use_triangulate:
+            bmesh.ops.triangulate(
+                bm, 
+                faces=bm.faces, 
+                quad_method=context.scene.cursor_bbox_hull_triangulate_quads, 
+                ngon_method=context.scene.cursor_bbox_hull_triangulate_ngons
+            )
         
         # Apply Push Value (Inflate along normals)
         if abs(push_value) > 0.0001:
