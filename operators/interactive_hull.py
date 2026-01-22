@@ -102,6 +102,39 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         # Remove interior geometry and ensure normals
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
         
+        # Apply dissolve_limit to clean up planar faces
+        dissolve_angle_deg = context.scene.cursor_bbox_hull_dissolve_angle
+        dissolve_angle_rad = radians(dissolve_angle_deg)
+        
+        if dissolve_angle_deg > 0:
+            bmesh.ops.dissolve_limit(
+                bm,
+                angle_limit=dissolve_angle_rad,
+                use_dissolve_boundaries=True,
+                verts=list(bm.verts),
+                edges=list(bm.edges),
+                delimit={'NORMAL'}
+            )
+            
+            # Ensure lookup tables after dissolve
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            
+            # Run convex hull again for cleaner results
+            bmesh.ops.convex_hull(bm, input=bm.verts)
+            
+            # Clean up again after second convex hull
+            verts_to_remove = [v for v in bm.verts if not v.link_faces]
+            if verts_to_remove:
+                bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
+            
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        
         # Apply Push Value (Inflate along normals)
         if abs(push_value) > 0.0001:
             # Simple vertex normal calculation

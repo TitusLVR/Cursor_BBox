@@ -532,6 +532,41 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
         bm.faces.ensure_lookup_table()
         
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        
+        # Apply dissolve_limit to clean up planar faces
+        import bpy
+        from math import radians
+        dissolve_angle_deg = bpy.context.scene.cursor_bbox_hull_dissolve_angle
+        dissolve_angle_rad = radians(dissolve_angle_deg)
+        
+        if dissolve_angle_deg > 0:
+            bmesh.ops.dissolve_limit(
+                bm,
+                angle_limit=dissolve_angle_rad,
+                use_dissolve_boundaries=True,
+                verts=list(bm.verts),
+                edges=list(bm.edges),
+                delimit={'NORMAL'}
+            )
+            
+            # Ensure lookup tables after dissolve
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            
+            # Run convex hull again for cleaner results
+            bmesh.ops.convex_hull(bm, input=bm.verts)
+            
+            # Clean up again after second convex hull
+            verts_to_remove = [v for v in bm.verts if not v.link_faces]
+            if verts_to_remove:
+                bmesh.ops.delete(bm, geom=verts_to_remove, context='VERTS')
+            
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
         # Apply push value (inflate)
         if abs(push_value) > 0.0001:

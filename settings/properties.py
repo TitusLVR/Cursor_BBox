@@ -56,6 +56,15 @@ def register():
         description="Name of the collection for collision objects",
         default="CursorBBox"
     )
+    
+    bpy.types.Scene.cursor_bbox_hull_dissolve_angle = bpy.props.FloatProperty(
+        name="Hull Dissolve Angle",
+        description="Angle threshold for dissolving planar faces in convex hull (degrees)",
+        default=5.0,
+        min=0.0,
+        max=180.0,
+        precision=1
+    )
 
     def update_material_color(self, context):
         """Update material color when property changes"""
@@ -112,3 +121,4 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_collection_name
     del bpy.types.Scene.cursor_bbox_material_color
     del bpy.types.Scene.cursor_bbox_use_material
+    del bpy.types.Scene.cursor_bbox_hull_dissolve_angle

@@ -98,6 +98,15 @@ class CursorBBox_PT_main(bpy.types.Panel):
         col.prop(scene, 'cursor_bbox_name_box', text="Bounding Box")
         col.prop(scene, 'cursor_bbox_name_sphere', text="Bounding Sphere")
         col.prop(scene, 'cursor_bbox_name_hull', text="Convex Hull")
+        
+        col.separator()
+        
+        # Hull-specific settings
+        row = col.row()
+        row.alignment = 'LEFT'
+        row.label(text="Hull Options", icon='MESH_ICOSPHERE')
+        
+        col.prop(scene, 'cursor_bbox_hull_dissolve_angle', text="Dissolve Angle")
 
         # Subtle preferences button
         row = box.row()
