@@ -298,7 +298,7 @@ def update_preview_faces(obj, face_indices, use_depsgraph=False):
     # Get evaluated mesh using shared utility
     mesh, obj_mat = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph)
     
-    # Process faces
+    # Process faces - use simple fan triangulation like marked faces
     for face_idx in face_indices:
         if face_idx >= len(mesh.polygons):
             continue
@@ -306,11 +306,11 @@ def update_preview_faces(obj, face_indices, use_depsgraph=False):
         face = mesh.polygons[face_idx]
         face_verts = [obj_mat @ mesh.vertices[i].co for i in face.vertices]
         
-        # Triangulate
+        # Triangulate if needed (same method as marked faces)
         if len(face_verts) == 3:
             vertices.extend(face_verts)
         else:
-            # Fan triangulation (continuing previous snippet logic)
+            # Fan triangulation
             for i in range(1, len(face_verts) - 1):
                 vertices.extend([face_verts[0], face_verts[i], face_verts[i + 1]])
     
@@ -569,12 +569,17 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
                     normal = vert_normals[v].normalized()
                     v.co += normal * push_value
 
-        # Prepare for drawing (n-gons and triangles will be visible in preview)
-        # Note: GPU drawing handles n-gons automatically, no need to triangulate
+        # Prepare for drawing - triangulate faces properly
         face_verts = []
         for f in bm.faces:
-             for v in f.verts:
-                 face_verts.append(v.co.copy())
+            verts = [v.co.copy() for v in f.verts]
+            # Triangulate using fan method
+            if len(verts) == 3:
+                face_verts.extend(verts)
+            elif len(verts) > 3:
+                # Fan triangulation from first vertex
+                for i in range(1, len(verts) - 1):
+                    face_verts.extend([verts[0], verts[i], verts[i + 1]])
         
         edge_verts = []
         for e in bm.edges:
@@ -692,10 +697,12 @@ def update_marked_faces_sphere(marked_faces_dict, cursor_location, cursor_rotati
         # Triangulate for face drawing
         bmesh.ops.triangulate(bm, faces=bm.faces)
         
+        # After triangulation, all faces should be triangles
         face_verts = []
         for f in bm.faces:
-             for v in f.verts:
-                 face_verts.append(v.co.copy())
+            if len(f.verts) == 3:  # Should always be true after triangulate
+                for v in f.verts:
+                    face_verts.append(v.co.copy())
             
         bm.free()
 

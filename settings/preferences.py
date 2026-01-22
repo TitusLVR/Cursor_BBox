@@ -1,6 +1,6 @@
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, StringProperty, EnumProperty
+from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, EnumProperty
 
 class CursorBBoxPreferences(AddonPreferences):
     """Addon preferences for Cursor Aligned Bounding Box"""
@@ -50,33 +50,6 @@ class CursorBBoxPreferences(AddonPreferences):
         default=0.3,
         min=0.0,
         max=1.0
-    )
-    
-    # Point marking settings - Using same color as edge highlight #46FFB4
-    point_marking_color: FloatVectorProperty(
-        name="Point Marking Color",
-        description="Color for marked points",
-        subtype='COLOR',
-        default=(0.275, 1.0, 0.706),  # #46FFB4 converted to RGB
-        min=0.0,
-        max=1.0
-    )
-    
-    point_marking_alpha: FloatProperty(
-        name="Point Marking Alpha",
-        description="Transparency for marked points",
-        default=0.9,
-        min=0.0,
-        max=1.0
-    )
-    
-    point_marking_size: FloatProperty(
-        name="Point Marking Size",
-        description="Size of point markers in Blender units",
-        default=0.1,
-        min=0.01,
-        max=1.0,
-        precision=3
     )
     
     # Bounding box settings
@@ -130,6 +103,50 @@ class CursorBBoxPreferences(AddonPreferences):
         default=True
     )
     
+    bbox_preview_face_alpha_multiplier: FloatProperty(
+        name="Preview Face Alpha Multiplier",
+        description="Multiplier for bbox preview face transparency (relative to wireframe alpha)",
+        default=0.3,
+        min=0.0,
+        max=1.0
+    )
+    
+    # Preview faces (hover) settings
+    preview_faces_color: FloatVectorProperty(
+        name="Preview Faces Color",
+        description="Color for face hover preview (when hovering over faces)",
+        subtype='COLOR',
+        default=(0.0, 1.0, 1.0),  # Cyan
+        min=0.0,
+        max=1.0
+    )
+    
+    preview_faces_alpha: FloatProperty(
+        name="Preview Faces Alpha",
+        description="Transparency for face hover preview",
+        default=0.35,
+        min=0.0,
+        max=1.0
+    )
+    
+    # Preview point settings
+    preview_point_color: FloatVectorProperty(
+        name="Preview Point Color",
+        description="Color for point preview (when hovering in add point mode)",
+        subtype='COLOR',
+        default=(0.0, 1.0, 0.0),  # Green
+        min=0.0,
+        max=1.0
+    )
+    
+    preview_point_alpha: FloatProperty(
+        name="Preview Point Alpha",
+        description="Transparency for point preview",
+        default=1.0,
+        min=0.0,
+        max=1.0
+    )
+    
     def draw(self, context):
         layout = self.layout
         
@@ -158,6 +175,34 @@ class CursorBBoxPreferences(AddonPreferences):
                 
                 row = box.row()
                 row.prop(self, "bbox_preview_show_faces")
+                
+                if self.bbox_preview_show_faces:
+                    row = box.row()
+                    row.prop(self, "bbox_preview_face_alpha_multiplier")
+            
+            layout.separator()
+            
+            # Preview faces (hover) settings
+            box = layout.box()
+            box.label(text="Face Hover Preview:", icon='GHOST_ENABLED')
+            
+            row = box.row()
+            row.prop(self, "preview_faces_color")
+            
+            row = box.row()
+            row.prop(self, "preview_faces_alpha")
+            
+            layout.separator()
+            
+            # Preview point settings
+            box = layout.box()
+            box.label(text="Point Preview:", icon='EMPTY_AXIS')
+            
+            row = box.row()
+            row.prop(self, "preview_point_color")
+            
+            row = box.row()
+            row.prop(self, "preview_point_alpha")
             
             layout.separator()
             
@@ -182,21 +227,6 @@ class CursorBBoxPreferences(AddonPreferences):
             
             row = box.row()
             row.prop(self, "face_marking_alpha")
-            
-            layout.separator()
-            
-            # Point marking settings
-            box = layout.box()
-            box.label(text="Point Marking:", icon='EMPTY_AXIS')
-            
-            row = box.row()
-            row.prop(self, "point_marking_color")
-            
-            row = box.row()
-            row.prop(self, "point_marking_alpha")
-            
-            row = box.row()
-            row.prop(self, "point_marking_size")
             
             layout.separator()
             

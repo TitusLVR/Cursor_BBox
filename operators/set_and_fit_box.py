@@ -52,6 +52,11 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
     # Collection instance handling
     instance_data = {}  # Dictionary to store instance data per object {obj: instance_data}
     
+    # Selection state preservation
+    original_selected_objects = []  # Original selection at operator start (for exit)
+    original_active_object = None
+    current_working_selection = []  # Current selection including real objects (for during operator)
+    
     def handle_collection_instance(self, context, obj, keep_previous_selection=False):
         """
         Check if object is a collection instance and make it real if needed.
@@ -82,6 +87,50 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             cleanup_collection_instance_temp(context, instance_info)
         self.instance_data.clear()
     
+    def restore_selection(self, context):
+        """Restore original selection state (with original instances, not real objects)."""
+        try:
+            # Deselect all first
+            bpy.ops.object.select_all(action='DESELECT')
+            
+            # Restore original selection (the instances, not the real objects)
+            for obj in self.original_selected_objects:
+                if obj and obj.name in bpy.data.objects:
+                    obj.select_set(True)
+            
+            # Restore active object
+            if self.original_active_object and self.original_active_object.name in bpy.data.objects:
+                context.view_layer.objects.active = self.original_active_object
+        except Exception as e:
+            print(f"Error restoring selection: {e}")
+    
+    def restore_working_selection(self, context):
+        """Restore current working selection (with real objects during operator)."""
+        try:
+            # Deselect all first
+            bpy.ops.object.select_all(action='DESELECT')
+            
+            # Restore working selection (includes real objects from instances)
+            for obj in self.current_working_selection:
+                if obj and obj.name in bpy.data.objects:
+                    try:
+                        obj.select_set(True)
+                    except:
+                        pass  # Object might have been deleted
+            
+            # Set an active object if we have any selected
+            if self.current_working_selection:
+                for obj in self.current_working_selection:
+                    if obj and obj.name in bpy.data.objects:
+                        context.view_layer.objects.active = obj
+                        break
+        except Exception as e:
+            print(f"Error restoring working selection: {e}")
+    
+    def update_working_selection(self, context):
+        """Update the current working selection to match context.selected_objects."""
+        self.current_working_selection = list(context.selected_objects)
+    
     def modal(self, context, event):
         # Update status bar with modal controls
         deps_state = "ON" if self.use_depsgraph else "OFF"
@@ -90,7 +139,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             mode_text = " [World Preview]"
         elif self.bbox_mode == 'local':
             mode_text = " [Local Preview]"
-        context.area.header_text_set(f"LMB: Place Cursor & Create BBox | Alt+Scroll: Select Edge | S: Snap | C: Create BBox | W: World Preview | Q: Local Preview | D: Depsgraph ({deps_state}){mode_text} | Space: Create/Finish | RMB/ESC: Cancel")
+        context.area.header_text_set(f"LMB: Place Cursor | Alt+Scroll: Select Edge | S: Snap | A: Create All | W: World | Q: Local | D: Depsgraph ({deps_state}){mode_text} | Space: Create | RMB/ESC: Cancel")
         
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
@@ -107,22 +156,20 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
             
             if result['success']:
-                cursor_aligned_bounding_box(self.push_value, result['object'], use_depsgraph=self.use_depsgraph)
-                self.report({'INFO'}, f"Cursor placed on {result['object'].name} and bounding box created")
+                # Store the targeted object for cursor-aligned mode
+                self.preview_target_obj = result['object']
+                self.report({'INFO'}, f"Cursor placed on {result['object'].name} (Press Space to create box)")
             else:
                 self.report({'WARNING'}, "No surface hit")
+                self.preview_target_obj = None
             
             return {'RUNNING_MODAL'}  # Continue modal instead of finishing
         
         elif event.type == 'C' and event.value == 'PRESS':
-            # Create bounding box with current cursor settings
-            result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
-            
-            if result['success']:
-                cursor_aligned_bounding_box(self.push_value, result['object'], use_depsgraph=self.use_depsgraph)
-                self.report({'INFO'}, f"Bounding box created for {result['object'].name}")
-            else:
-                self.report({'WARNING'}, "No surface hit")
+            # Create bounding box with current cursor settings for selected objects
+            # Don't pass target_obj so it uses selected objects instead
+            cursor_aligned_bounding_box(self.push_value, use_depsgraph=self.use_depsgraph)
+            self.report({'INFO'}, f"Bounding box created for selected objects")
             
             return {'RUNNING_MODAL'}  # Continue modal
         
@@ -186,95 +233,138 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
+        # Create boxes for ALL selected objects (A)
+        elif event.type == 'A' and event.value == 'PRESS':
+            # Get selected mesh objects
+            all_selected = list(context.selected_objects)
+            mesh_objects = [obj for obj in all_selected if obj.type == 'MESH' and obj.data and len(obj.data.vertices) > 0]
+            
+            if not mesh_objects:
+                self.report({'WARNING'}, f"No valid mesh objects selected (total selected: {len(all_selected)})")
+                return {'RUNNING_MODAL'}
+            
+            # Create cursor-aligned box for EACH individual object
+            boxes_created = 0
+            
+            for obj in mesh_objects:
+                try:
+                    # Create box for this individual object
+                    cursor_aligned_bounding_box(self.push_value, target_obj=obj, use_depsgraph=self.use_depsgraph)
+                    boxes_created += 1
+                except Exception as e:
+                    print(f"Error creating box for {obj.name}: {e}")
+            
+            if boxes_created > 0:
+                self.report({'INFO'}, f"Created {boxes_created} cursor-aligned bounding box(es) for all selected")
+                # Restore working selection
+                self.restore_working_selection(context)
+            else:
+                self.report({'ERROR'}, "Failed to create any bounding boxes")
+            
+            return {'RUNNING_MODAL'}
+        
         # World Oriented Preview Toggle (W)
         elif event.type == 'W' and event.value == 'PRESS':
-            # Toggle off if already in world mode
+            # Toggle world constraint on/off
             if self.bbox_mode == 'world':
+                # Turn off
                 self.bbox_mode = None
                 self.preview_target_obj = None
-                # Clear preview
                 from ..functions.core import _state
                 _state.current_bbox_data = None
-                self.report({'INFO'}, "World-oriented preview OFF")
+                self.report({'INFO'}, "World-oriented constraint OFF")
                 context.area.tag_redraw()
             else:
-                # Toggle on - use existing target if available, otherwise get new one
-                if self.preview_target_obj and self.bbox_mode:
-                    # Switch mode using existing target
-                    self.bbox_mode = 'world'
-                    update_world_oriented_bbox_preview(self.preview_target_obj, self.push_value, self.use_depsgraph)
-                    self.report({'INFO'}, f"World-oriented preview ON for {self.preview_target_obj.name} (Press Space to create)")
-                    context.area.tag_redraw()
-                else:
-                    # Get new target object
-                    result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
-                    
-                    if result['success']:
-                        self.bbox_mode = 'world'
-                        self.preview_target_obj = result['object']
-                        update_world_oriented_bbox_preview(result['object'], self.push_value, self.use_depsgraph)
-                        self.report({'INFO'}, f"World-oriented preview ON for {result['object'].name} (Press Space to create)")
-                        context.area.tag_redraw()
-                    else:
-                        self.report({'WARNING'}, "No surface hit - cannot enable preview")
+                # Turn on
+                self.bbox_mode = 'world'
+                # No need to set preview_target_obj, we'll use whatever is selected when Space is pressed
+                self.report({'INFO'}, "World-oriented constraint ON (Press Space to create)")
+                context.area.tag_redraw()
             
             return {'RUNNING_MODAL'}
         
         # Local Oriented Preview Toggle (Q)
         elif event.type == 'Q' and event.value == 'PRESS':
-            # Toggle off if already in local mode
+            # Toggle local constraint on/off
             if self.bbox_mode == 'local':
+                # Turn off
                 self.bbox_mode = None
                 self.preview_target_obj = None
-                # Clear preview
                 from ..functions.core import _state
                 _state.current_bbox_data = None
-                self.report({'INFO'}, "Local-oriented preview OFF")
+                self.report({'INFO'}, "Local-oriented constraint OFF")
                 context.area.tag_redraw()
             else:
-                # Toggle on - use existing target if available, otherwise get new one
-                if self.preview_target_obj and self.bbox_mode:
-                    # Switch mode using existing target
-                    self.bbox_mode = 'local'
-                    update_local_oriented_bbox_preview(self.preview_target_obj, self.push_value, self.use_depsgraph)
-                    self.report({'INFO'}, f"Local-oriented preview ON for {self.preview_target_obj.name} (Press Space to create)")
-                    context.area.tag_redraw()
-                else:
-                    # Get new target object
-                    result = place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, preview=False, use_depsgraph=self.use_depsgraph)
-                    
-                    if result['success']:
-                        self.bbox_mode = 'local'
-                        self.preview_target_obj = result['object']
-                        update_local_oriented_bbox_preview(result['object'], self.push_value, self.use_depsgraph)
-                        self.report({'INFO'}, f"Local-oriented preview ON for {result['object'].name} (Press Space to create)")
-                        context.area.tag_redraw()
-                    else:
-                        self.report({'WARNING'}, "No surface hit - cannot enable preview")
+                # Turn on
+                self.bbox_mode = 'local'
+                # No need to set preview_target_obj, we'll use whatever is selected when Space is pressed
+                self.report({'INFO'}, "Local-oriented constraint ON (Press Space to create)")
+                context.area.tag_redraw()
             
             return {'RUNNING_MODAL'}
         
-        # Create/Finish operator (Space)
+        # Create box (Space) - W/Q are constraints for both preview and creation
         elif event.type == 'SPACE' and event.value == 'PRESS':
-            # If we have a preview mode active, create the bounding box
-            if self.bbox_mode == 'world' and self.preview_target_obj:
-                world_oriented_bounding_box(self.push_value, self.preview_target_obj, use_depsgraph=self.use_depsgraph)
-                self.report({'INFO'}, f"World-oriented bounding box created for {self.preview_target_obj.name}")
-                self.bbox_mode = None
-                self.preview_target_obj = None
-                return {'RUNNING_MODAL'}  # Continue modal
-            elif self.bbox_mode == 'local' and self.preview_target_obj:
-                local_oriented_bounding_box(self.push_value, self.preview_target_obj, use_depsgraph=self.use_depsgraph)
-                self.report({'INFO'}, f"Local-oriented bounding box created for {self.preview_target_obj.name}")
-                self.bbox_mode = None
-                self.preview_target_obj = None
-                return {'RUNNING_MODAL'}  # Continue modal
+            # Get selected mesh objects
+            all_selected = list(context.selected_objects)
+            mesh_objects = [obj for obj in all_selected if obj.type == 'MESH' and obj.data and len(obj.data.vertices) > 0]
+            
+            if not mesh_objects:
+                self.report({'WARNING'}, f"No valid mesh objects selected (total selected: {len(all_selected)})")
+                return {'RUNNING_MODAL'}
+            
+            # Create bounding box based on current constraint mode (W/Q)
+            if self.bbox_mode == 'world':
+                # World-oriented constraint: create for all selected objects
+                try:
+                    world_oriented_bounding_box(self.push_value, use_depsgraph=self.use_depsgraph)
+                    self.report({'INFO'}, f"World-oriented bounding box created for {len(mesh_objects)} object(s)")
+                    # Restore working selection
+                    self.restore_working_selection(context)
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to create world-oriented box: {str(e)}")
+                    print(f"Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
+                return {'RUNNING_MODAL'}
+                
+            elif self.bbox_mode == 'local':
+                # Local-oriented constraint: create for all selected objects
+                try:
+                    local_oriented_bounding_box(self.push_value, use_depsgraph=self.use_depsgraph)
+                    self.report({'INFO'}, f"Local-oriented bounding box created for {len(mesh_objects)} object(s)")
+                    # Restore working selection
+                    self.restore_working_selection(context)
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to create local-oriented box: {str(e)}")
+                    print(f"Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
+                return {'RUNNING_MODAL'}
+                
             else:
-                # No preview active, finish operator
-                disable_edge_highlight()
-                disable_bbox_preview()
-                context.area.header_text_set(None)  # Clear status bar
-                return {'FINISHED'}
+                # No constraint: create cursor-aligned box for the TARGETED object (from last click)
+                if not self.preview_target_obj:
+                    self.report({'WARNING'}, "No object targeted. Click on an object first.")
+                    return {'RUNNING_MODAL'}
+                
+                try:
+                    # Create box for the targeted object only
+                    cursor_aligned_bounding_box(self.push_value, target_obj=self.preview_target_obj, use_depsgraph=self.use_depsgraph)
+                    self.report({'INFO'}, f"Cursor-aligned bounding box created for {self.preview_target_obj.name}")
+                    # Restore working selection
+                    self.restore_working_selection(context)
+                    # Clear target so user must click again for next box
+                    self.preview_target_obj = None
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to create bounding box: {str(e)}")
+                    print(f"Error creating box for {self.preview_target_obj.name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                
+                return {'RUNNING_MODAL'}
         
         elif event.type == 'ESC':
             self.bbox_mode = None
@@ -282,6 +372,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             self.cleanup_all_instances(context)  # Clean up collection instances
+            self.restore_selection(context)  # Restore original selection
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
 
@@ -291,6 +382,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             self.cleanup_all_instances(context)  # Clean up collection instances
+            self.restore_selection(context)  # Restore original selection
             context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
         
@@ -304,6 +396,10 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             self.preview_target_obj = None
             self.instance_data = {}
             
+            # Store original selection state (for final restoration on exit)
+            self.original_selected_objects = list(context.selected_objects)
+            self.original_active_object = context.view_layer.objects.active
+            
             # Check for collection instances in selected objects
             selected_objects_list = list(context.selected_objects)
             for i, obj in enumerate(selected_objects_list):
@@ -314,6 +410,9 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
                     real_objs = self.handle_collection_instance(context, obj, keep_previous)
                     if not real_objs:
                         self.report({'WARNING'}, f"Failed to process instance: {obj.name}")
+            
+            # Update working selection to reflect current state (after instances are made real)
+            self.update_working_selection(context)
             
             enable_edge_highlight()
             enable_bbox_preview()

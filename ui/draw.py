@@ -208,21 +208,21 @@ def draw_preview_faces(gpu_manager, preview_faces_visual_cache, show_backfaces=F
     """Draw preview faces (hover highlight)"""
     if not preview_faces_visual_cache:
         return
-        
-    # Cyan color for preview, slightly transparent
-    preview_color = (0.0, 1.0, 1.0, 0.2)
+    
+    # Get color from preferences
+    try:
+        prefs = get_preferences()
+        if prefs:
+            preview_color = (*prefs.preview_faces_color, prefs.preview_faces_alpha)
+        else:
+            preview_color = (0.0, 1.0, 1.0, 0.35)
+    except:
+        preview_color = (0.0, 1.0, 1.0, 0.35)
     
     # Set up GPU state
     gpu.state.blend_set('ALPHA')
-    gpu.state.depth_test_set('LESS_EQUAL') # Preview can be behind objects slightly, or on top?
-    # Let's draw on top like marked faces to be visible
-    gpu.state.depth_test_set('ALWAYS')
-    
-    # Handle backface culling
-    if not show_backfaces:
-        gpu.state.face_culling_set('BACK')
-    else:
-        gpu.state.face_culling_set('NONE')
+    gpu.state.depth_test_set('ALWAYS')  # Draw on top to be visible
+    gpu.state.face_culling_set('NONE')
     
     shader = gpu_manager.get_shader('UNIFORM_COLOR')
     shader.uniform_float("color", preview_color)
@@ -285,10 +285,17 @@ def draw_marked_faces(gpu_manager, marked_faces_visual_cache, marked_points, sho
     if marked_points:
         draw_marked_points(gpu_manager, marked_points, face_color)
         
-    # Draw preview point if exists (e.g. green)
+    # Draw preview point if exists (use preferences color)
     if preview_point:
-        preview_color = (0.0, 1.0, 0.0, 1.0)
-        draw_marked_points(gpu_manager, [preview_point], preview_color)
+        try:
+            prefs = get_preferences()
+            if prefs:
+                preview_point_color = (*prefs.preview_point_color, prefs.preview_point_alpha)
+            else:
+                preview_point_color = (0.0, 1.0, 0.0, 1.0)
+        except:
+            preview_point_color = (0.0, 1.0, 0.0, 1.0)
+        draw_marked_points(gpu_manager, [preview_point], preview_point_color)
     
     # Reset GPU state
     gpu.state.blend_set('NONE')
@@ -304,44 +311,53 @@ def draw_bbox_preview(gpu_manager, current_bbox_data, use_culling=False):
         prefs = get_preferences()
         if prefs:
             wireframe_color = (*prefs.bbox_preview_color, prefs.bbox_preview_alpha)
-            face_color = (*prefs.bbox_preview_color, prefs.bbox_preview_alpha * 0.2)
+            face_color = (*prefs.bbox_preview_color, prefs.bbox_preview_alpha * prefs.bbox_preview_face_alpha_multiplier)
             line_width = prefs.bbox_preview_line_width
             show_faces = prefs.bbox_preview_show_faces
         else:
             wireframe_color = (1.0, 1.0, 0.0, 0.8)
-            face_color = (1.0, 1.0, 0.0, 0.1)
+            face_color = (1.0, 1.0, 0.0, 0.25)  # Increased from 0.1
             line_width = 2.0
             show_faces = True
     except:
         wireframe_color = (1.0, 1.0, 0.0, 0.8)
-        face_color = (1.0, 1.0, 0.0, 0.1)
+        face_color = (1.0, 1.0, 0.0, 0.25)  # Increased from 0.1
         line_width = 2.0
         show_faces = True
     
-    # Set up GPU state - draw behind other elements
-    gpu.state.blend_set('ALPHA')
-    gpu.state.depth_test_set('LESS_EQUAL')  # Normal depth testing
-    
-    # Handle backface culling
-    if use_culling:
-        gpu.state.face_culling_set('BACK')
-    else:
-        gpu.state.face_culling_set('NONE')
-    
-    shader = gpu_manager.get_shader('UNIFORM_COLOR')
-    
-    # Draw faces if enabled (behind everything)
+    # Draw faces if enabled
     if show_faces and current_bbox_data.get('faces'):
+        # Set up GPU state for transparent faces that draw behind marked faces
+        gpu.state.blend_set('ALPHA')
+        gpu.state.depth_test_set('LESS_EQUAL')
+        gpu.state.depth_mask_set(False)  # Don't write to depth buffer
+        
+        # Handle backface culling - force NONE to draw all triangles
+        gpu.state.face_culling_set('NONE')
+        
+        # Use simple UNIFORM_COLOR shader
+        shader = gpu_manager.get_shader('UNIFORM_COLOR')
+        
+        # Keep original color - the proper triangulation fixed the main issue
+        shader.uniform_float("color", face_color)
+        
         face_batch = gpu_manager.get_cached_batch(
             'bbox_faces', 'TRIS', current_bbox_data['faces']
         )
         if face_batch:
-            shader.uniform_float("color", face_color)
             face_batch.draw(shader)
+        
+        # Re-enable depth writes for wireframe
+        gpu.state.depth_mask_set(True)
     
-    # Draw wireframe (slightly forward but still behind marked faces)
+    # Draw wireframe (on top of faces for clarity)
     if current_bbox_data.get('edges'):
+        gpu.state.blend_set('ALPHA')
+        gpu.state.depth_test_set('LESS_EQUAL')
+        gpu.state.face_culling_set('NONE')
         gpu.state.line_width_set(line_width)
+        
+        shader = gpu_manager.get_shader('UNIFORM_COLOR')
         edge_batch = gpu_manager.get_cached_batch(
             'bbox_edges', 'LINES', current_bbox_data['edges']
         )
@@ -352,6 +368,7 @@ def draw_bbox_preview(gpu_manager, current_bbox_data, use_culling=False):
     # Reset GPU state
     gpu.state.blend_set('NONE')
     gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.depth_mask_set(True)
     gpu.state.face_culling_set('NONE')
     gpu.state.line_width_set(1.0)
 
@@ -366,16 +383,24 @@ def create_edge_highlight_handler(state):
 def create_face_marking_handler(state):
     """Create face marking drawing handler"""
     def draw_marked_faces_wrapper():
-        # Draw preview first (so marked faces draw on top if they overlap)
+        # Draw bbox preview first (behind)
+        if hasattr(state, 'current_bbox_data') and state.current_bbox_data:
+            draw_bbox_preview(state.gpu_manager, state.current_bbox_data, use_culling=getattr(state, 'preview_culling', False))
+        
+        # Draw hover preview faces (so marked faces draw on top if they overlap)
         if hasattr(state, 'preview_faces_visual_cache'):
              draw_preview_faces(state.gpu_manager, state.preview_faces_visual_cache, show_backfaces=getattr(state, 'show_backfaces', False))
+        
+        # Draw marked faces on top
         draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points, show_backfaces=getattr(state, 'show_backfaces', False), preview_point=getattr(state, 'preview_point', None))
     return draw_marked_faces_wrapper
 
 def create_bbox_preview_handler(state):
-    """Create bbox preview drawing handler"""
+    """Create bbox preview drawing handler - only when face_marking handler is not active"""
     def draw_bbox_preview_wrapper():
-        draw_bbox_preview(state.gpu_manager, state.current_bbox_data, use_culling=getattr(state, 'preview_culling', False))
+        # Only draw if face_marking handler is not active (to avoid double-drawing)
+        if 'face_marking' not in state.handlers:
+            draw_bbox_preview(state.gpu_manager, state.current_bbox_data, use_culling=getattr(state, 'preview_culling', False))
     return draw_bbox_preview_wrapper
 
 # ===== HANDLER MANAGEMENT =====
