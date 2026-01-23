@@ -25,7 +25,7 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
     
     def modal(self, context, event):
         # Update status bar with modal controls
-        context.area.header_text_set("LMB: Place Cursor | Scroll: Select Edge | S: Snap to Face Element | RMB/ESC: Cancel")
+        context.area.header_text_set("LMB: Place | Scroll: Edge | S: Snap | RMB: Done | ESC: Cancel")
         
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:

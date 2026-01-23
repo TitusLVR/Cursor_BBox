@@ -2,29 +2,49 @@
 
 # Cursor Aligned Bounding Box
 
-Blender addon for precise cursor placement and cursor-aligned bounding box creation with advanced marking and snapping features.
+Blender addon for cursor-aligned bounding shape creation with face marking and coplanar selection.
 
-**[Full Documentation](https://tituslvr.github.io/Cursor_BBox/)** | **[GitHub Repository](https://github.com/TitusLVR/Cursor_BBox)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
-
+**[Documentation](https://tituslvr.github.io/Cursor_BBox/)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)** | **[Source](https://github.com/TitusLVR/Cursor_BBox)**
 
 ## Features
 
-- **Raycast cursor placement** with face/edge alignment
-- **Interactive bounding shapes**: Box, Convex Hull, and Bounding Sphere
-- **Face marking system** for selective bounding
-- **Smart snapping** to vertices, edges, and face centers
-- **Real-time visual feedback** with color-coded highlights
-- **Collection instance support** - Works seamlessly with linked assets
+**Operators**
+- Interactive Box — Fit bounding box around marked faces or active object
+- Interactive Hull — Fit convex hull around marked faces
+- Interactive Sphere — Fit bounding sphere around marked faces
+- Set & Fit Box — Set cursor and immediately fit bounding box
+- Set Cursor — Set cursor location and rotation aligned to surface
+
+**Marking & Selection**
+- Face marking with LMB or F key
+- Coplanar face selection with adjustable angle threshold
+- Custom point addition for precise bounds
+- Visual feedback (red faces, green edges)
+
+**Configuration**
+- Push offset for geometry inflation/deflation
+- Material and color assignment
+- Collection organization
+- Custom object naming
 
 ## Installation
 
-1. Copy the `Cursor_BBox` folder to your Blender addons directory: `[Blender]/scripts/addons/`
-2. Enable the addon in **Edit > Preferences > Add-ons** (search for "Cursor Aligned Bounding Box")
-3. Access the panel via **View3D Sidebar** (press `N`) > **Cursor BBox** tab
+1. Copy `Cursor_BBox` folder to Blender addons directory
+2. Enable in Edit > Preferences > Add-ons
+3. Access panel via N key in 3D Viewport
+
+**Addon Paths**
+- Windows: `%APPDATA%\Blender Foundation\Blender\[Version]\scripts\addons\`
+- macOS: `~/Library/Application Support/Blender/[Version]/scripts/addons/`
+- Linux: `~/.config/blender/[Version]/scripts/addons/`
 
 ## Requirements
 
-- Blender 5.xx
+- Blender 4.0 or higher
 - GPU with OpenGL support
 
-For detailed usage, controls, and workflows, see the [full documentation](https://tituslvr.github.io/Cursor_BBox/).
+## Documentation
+
+- [Installation Guide](https://tituslvr.github.io/Cursor_BBox/installation/) — Setup and troubleshooting
+- [Usage Guide](https://tituslvr.github.io/Cursor_BBox/usage/) — Controls and workflows
+- [GitHub Issues](https://github.com/TitusLVR/Cursor_BBox/issues) — Bug reports and feature requests

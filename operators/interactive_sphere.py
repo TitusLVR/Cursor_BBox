@@ -230,14 +230,15 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         preview_cull_state = "ON" if get_preview_culling() else "OFF"
         
         if self.point_mode:
-            snap_state = "ON" if self.snap_enabled else "OFF"
-            limit_state = "ON" if self.limit_plane_mode else "OFF"
+            snap_state = "✓" if self.snap_enabled else "✗"
+            limit_state = "✓" if self.limit_plane_mode else "✗"
             context.area.header_text_set(
-                f"-- POINT MODE -- | LMB: Add Point | S: Snap ({snap_state}) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | C: Limit Plane ({limit_state}) | A: Exit Mode | ESC: Cancel"
+                f"POINT MODE | LMB: Add | S: Snap {snap_state} | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
             )
         else:
             context.area.header_text_set(
-                f"{status_text} | LMB/F: Mark/Unmark | C: Coplanar ({coplanar_state}) | P: Backfaces ({backface_state}) | O: Preview Cull ({preview_cull_state}) | D: Depsgraph ({deps_state}) | Alt+Scroll: Edge | Ctrl+Scroll: Snap Thresh | 1-7: Angle Presets | Shift(+Ctrl): Angle ({int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}°) | A: Add Point Mode | S: Snap | Z: Clear"
+                f"{status_text} | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
+                f"D: Deps {deps_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
             )
         
         # Toggle Depsgraph (D)
@@ -321,15 +322,15 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             
             # Force update header immediately
             if self.point_mode:
-                snap_state = "ON" if self.snap_enabled else "OFF"
-                limit_state = "ON" if self.limit_plane_mode else "OFF"
+                snap_state = "✓" if self.snap_enabled else "✗"
+                limit_state = "✓" if self.limit_plane_mode else "✗"
                 context.area.header_text_set(
-                    f"-- POINT MODE -- | LMB: Add Point | S: Snap ({snap_state}) | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | C: Limit Plane ({limit_state}) | A: Exit Mode | ESC: Cancel"
+                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
                 )
             else:
-                marking_status = f" ({len(self.marked_faces)} objects marked)" if self.marked_faces else ""
+                marking_status = f" ({len(self.marked_faces)} marked)" if self.marked_faces else ""
                 context.area.header_text_set(
-                    f"Space: Create Sphere{marking_status} | LMB/F: Mark/Unmark | Alt+Scroll: Edge | Ctrl+Scroll: Snap Thresh ({self.snap_threshold}px) | A: Add Point Mode | Z: Clear | RMB/ESC: Cancel"
+                    f"Space: Create Sphere{marking_status} | LMB: Mark | Ctrl+Scroll: Threshold {self.snap_threshold}px | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
                 )
             
             return {'RUNNING_MODAL'}

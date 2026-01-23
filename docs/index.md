@@ -2,63 +2,100 @@
 
 # Cursor Aligned Bounding Box
 
-A powerful Blender addon for precise 3D cursor placement and intelligent bounding shape creation. Create perfectly aligned bounding boxes, convex hulls, and bounding spheres with advanced marking, snapping, and visual feedback features.
+Blender addon for cursor-aligned bounding shape creation with face marking and coplanar selection.
 
-## Useful Links
+## Quick Links
 
-- **GitHub Repository**: [https://github.com/TitusLVR/Cursor_BBox](https://github.com/TitusLVR/Cursor_BBox)
-- **Releases**: [https://github.com/TitusLVR/Cursor_BBox/releases](https://github.com/TitusLVR/Cursor_BBox/releases)
-
+- [GitHub Repository](https://github.com/TitusLVR/Cursor_BBox)
+- [Latest Release](https://github.com/TitusLVR/Cursor_BBox/releases)
+- [Installation Guide](installation.md)
+- [Usage Guide](usage.md)
 
 ## Overview
 
-Cursor BBox provides an interactive, modal workflow for working with bounding volumes in Blender. The addon enables you to:
+Creates bounding volumes (boxes, convex hulls, spheres) aligned to 3D cursor with face marking and point addition support.
 
-- **Place the 3D cursor** with pixel-perfect precision using raycasting
-- **Create aligned bounding shapes** that automatically orient to your geometry
-- **Mark specific faces** for selective bounding calculations
-- **Add custom points** to include arbitrary locations in your calculations
-- **Snap precisely** to vertices, edges, and face centers
-- **Visualize everything** in real-time with color-coded feedback
+**Core Features**
+- Raycast-based cursor placement with face/edge alignment
+- Multiple bounding shape types (box, hull, sphere)
+- Face marking for selective bounding
+- Coplanar face selection with angle threshold
+- Custom point addition
+- Real-time visual feedback
 
-Ideal for game development, collision mesh creation, architectural visualization, and any workflow requiring precise bounding volumes.
+**Use Cases**
+- Collision mesh creation for game engines
+- LOD generation and simplified geometry
+- Architectural space bounding
+- Alignment helpers and reference objects
+
+## Operators
+
+### Interactive Box
+**Description:** Fit bounding box around marked faces or active object  
+Creates cursor-aligned bounding box. Box orientation follows cursor rotation. Supports face marking for partial bounds.
+
+### Interactive Hull
+**Description:** Fit convex hull around marked faces  
+Generates convex hull from marked face vertices and custom points. Hull encloses all marked elements.
+
+### Interactive Sphere
+**Description:** Fit bounding sphere around marked faces  
+Creates minimum-radius sphere encompassing marked vertices. Center calculated from marked elements.
+
+### Set & Fit Box
+**Description:** Set cursor and immediately fit bounding box  
+One-click operation. Places cursor and creates bounding box without modal interaction.
+
+### Set Cursor
+**Description:** Set cursor location and rotation aligned to surface  
+Raycast-based cursor placement. Aligns to face normals when enabled.
 
 ## Key Features
 
-### Precision Cursor Placement
-- **Raycast-based positioning**: Hover over any surface to place the cursor exactly where you need it
-- **Face alignment**: Automatically align the cursor rotation to face normals
-- **Edge-based orientation**: Use mouse wheel to cycle through edge alignments for perfect box orientation
-- **Smart snapping**: Snap to vertices, edges, or face centers with a single keypress
+### Face Marking
+- Mark faces with LMB or F key
+- Visual feedback (red highlight)
+- Clear markings with Z key
+- Toggle individual faces
 
-### Multiple Bounding Shape Types
-- **Interactive Box**: Create axis-aligned or face-aligned bounding boxes
-- **Interactive Hull**: Generate convex hulls wrapping marked geometry
-- **Interactive Sphere**: Create bounding spheres encompassing selected elements
-- **Auto Fit Box**: One-click bounding box generation with current settings
+### Coplanar Selection
+- Automatic connected face selection
+- Adjustable angle threshold (default 5°)
+- Toggle with C key
+- Adjust threshold with Shift + Mouse Wheel
 
-### Advanced Marking System
-- **Face marking**: Selectively mark faces to include only specific regions in calculations
-- **Point marking**: Add custom points in 3D space to influence bounding calculations
-- **Coplanar selection**: Automatically select connected coplanar faces with adjustable angle threshold
-- **Visual feedback**: See marked faces highlighted in red, selected edges in green
+### Cursor Alignment
+- Raycast to surface
+- Face normal alignment
+- Edge-based rotation (mouse wheel)
+- Snap to vertices/edges/face centers (S key)
 
-### Flexible Configuration
-- **Push offset**: Inflate or deflate generated geometry by a specified amount
-- **Material system**: Automatically apply materials and colors to created objects
-- **Collection management**: Organize generated objects into dedicated collections
-- **Custom naming**: Configure naming patterns for different shape types
+### Visual Feedback
+- Red: Marked faces
+- Green: Selected edge alignment
+- Wireframe: Bounding shape preview
+- Point markers: Custom points
 
-### Intuitive Controls
-- **Modal workflow**: Stay in the tool for multiple operations without exiting
-- **Keyboard shortcuts**: Efficient key-based controls for all operations
-- **Pie menu support**: Quick access via Shift+Alt+C
-- **Real-time preview**: See bounding shapes before finalizing
+## Settings
 
-## Use Cases
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| Push Offset | 0.01 | Inflate/deflate geometry |
+| Align to Face | Enabled | Auto-align cursor to normals |
+| Auto-Select Coplanar | Disabled | Default coplanar mode state |
+| Angle Threshold | 5° | Coplanar detection tolerance |
+| Use Material | Disabled | Apply material to objects |
+| Color | #FF943B | Material and display color |
+| Collection | CursorBBox | Target collection name |
 
-- **Game Development**: Create collision meshes, trigger volumes, and bounding boxes for physics
-- **Architectural Visualization**: Generate precise bounding volumes for room calculations
-- **3D Modeling**: Quickly create reference boxes and alignment helpers
-- **Animation**: Set up precise pivot points and alignment guides
-- **Technical Art**: Generate custom collision shapes and bounding volumes
+## System Requirements
+
+| Component | Requirement |
+|:----------|:------------|
+| Blender | 4.0+ (tested to 5.0+) |
+| GPU | OpenGL support |
+| Python | Included with Blender |
+| OS | Windows, macOS, Linux |
+
+**Version:** 1.0.9

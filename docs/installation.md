@@ -2,95 +2,177 @@
 
 # Installation
 
-## Quick Start
+## Quick Install
 
-1. **Download the addon**: Clone or download this repository
-2. **Locate Blender's addons directory**: 
-   - **Windows**: `C:\Users\[YourUsername]\AppData\Roaming\Blender Foundation\Blender\[Version]\scripts\addons\`
-   - **macOS**: `~/Library/Application Support/Blender/[Version]/scripts/addons/`
-   - **Linux**: `~/.config/blender/[Version]/scripts/addons/`
-3. **Copy the addon folder**: Place the entire `Cursor_BBox` folder into the addons directory
-4. **Enable the addon**: 
-   - Open Blender
-   - Go to `Edit > Preferences > Add-ons`
-   - Search for "Cursor Aligned Bounding Box"
-   - Check the checkbox to enable it
-5. **Access the panel**: Press `N` in the 3D Viewport to open the sidebar, then navigate to the "Cursor BBox" tab
+1. Download [latest release](https://github.com/TitusLVR/Cursor_BBox/releases) or clone repository
+2. Copy `Cursor_BBox` folder to Blender addons directory
+3. Enable in Edit > Preferences > Add-ons (search "Cursor Aligned Bounding Box")
+4. Access via N key in 3D Viewport > Cursor BBox tab
 
-## Installation Methods
+### Addon Directory Paths
 
-### Method 1: Manual Installation (Recommended)
-This is the standard method for installing Blender addons:
+| OS | Path |
+|:---|:-----|
+| Windows | `%APPDATA%\Blender Foundation\Blender\[Version]\scripts\addons\` |
+| macOS | `~/Library/Application Support/Blender/[Version]/scripts/addons/` |
+| Linux | `~/.config/blender/[Version]/scripts/addons/` |
 
-1. Download or clone the repository
-2. Copy the `Cursor_BBox` folder to your Blender addons directory
-3. Enable through Blender's preferences
+**Folder Structure**
+```
+addons/
+  └── Cursor_BBox/
+      ├── __init__.py
+      ├── operators/
+      ├── functions/
+      ├── settings/
+      └── ui/
+```
 
-### Method 2: Install from File
-If you have a `.zip` file of the addon:
+!!! warning
+    `__init__.py` must be directly inside `Cursor_BBox/` folder.
 
-1. Open Blender
-2. Go to `Edit > Preferences > Add-ons`
-3. Click `Install...` button
-4. Select the `.zip` file
-5. Enable the addon from the list
+## Alternative: Install from ZIP
 
-## Post-Installation Setup
+1. Edit > Preferences > Add-ons
+2. Click Install button
+3. Select `.zip` file
+4. Enable addon in list
 
-After installation, you may want to:
+## Configuration
 
-1. **Set up keyboard shortcuts**: The addon includes a pie menu accessible via `Shift+Alt+C`. You can customize this in `Edit > Preferences > Keymap`
-2. **Configure default settings**: Open the Cursor BBox panel (`N` key in 3D Viewport) and adjust:
-   - Push Offset (default: 0.01)
-   - Align to Face (default: enabled)
-   - Material settings
-   - Collection naming
-3. **Test the installation**: 
-   - Select an object in your scene
-   - Open the Cursor BBox panel
-   - Try the "Auto Fit Box" button to verify everything works
+### Keyboard Shortcuts
+
+Default pie menu: `Shift+Alt+C`
+
+To customize:
+1. Edit > Preferences > Keymap
+2. Search "Cursor BBox" or "call_menu_pie"
+3. Expand 3D View > 3D View (Global)
+4. Modify key combination
+
+### Default Settings
+
+| Setting | Default | Range |
+|:--------|:--------|:------|
+| Push Offset | 0.01 | Any float |
+| Align to Face | Enabled | Boolean |
+| Auto-Select Coplanar | Disabled | Boolean |
+| Angle Threshold | 5° | 0.01-180° |
+| Use Material | Disabled | Boolean |
+| Color | #FF943B | RGB |
+
+### Test Installation
+
+1. Select mesh object
+2. Open Cursor BBox panel (N key)
+3. Click Auto Fit Box
+4. Verify bounding box created
 
 ## Requirements
 
-### Minimum Requirements
-- **Blender Version**: 3.0 or higher (tested up to 5.0+)
-- **GPU**: Any GPU with OpenGL support (required for viewport drawing)
-- **Python**: Included with Blender (no separate installation needed)
+### Minimum
+
+| Component | Requirement |
+|:----------|:------------|
+| Blender | 4.0+ |
+| GPU | OpenGL support |
+| RAM | 4GB |
+| Python | Included with Blender |
 
 ### Recommended
-- **Blender 4.0+**: For best compatibility and performance
-- **Dedicated GPU**: For smooth viewport performance with complex scenes
-- **8GB+ RAM**: For working with large meshes and multiple objects
+
+| Component | Specification |
+|:----------|:--------------|
+| Blender | 4.2+ or 5.0+ |
+| GPU | Dedicated GPU |
+| RAM | 8GB+ |
+| Display | 1920×1080+ |
+
+### Tested Versions
+- Blender 4.0.x, 4.1.x, 4.2.x, 5.0.x
+
+!!! info
+    Version 3.6+ may work but not officially supported.
 
 ## Troubleshooting
 
 ### Addon Not Appearing
-- Ensure the folder structure is correct: `[addons]/Cursor_BBox/__init__.py` must exist
-- Check that you're looking in the correct Blender version's addons folder
-- Try restarting Blender completely
 
-### Panel Not Showing
-- Press `N` in the 3D Viewport to toggle the sidebar
-- Ensure you're in Object Mode (not Edit Mode)
-- Check that the addon is enabled in Preferences
+**Cause:** Incorrect folder structure or location
+
+**Solutions:**
+- Verify `__init__.py` inside `Cursor_BBox/`
+- Check correct addons directory
+- Restart Blender
+- Check System Console (Window > Toggle System Console) for errors
+
+### Panel Not Visible
+
+**Cause:** Sidebar hidden or wrong mode
+
+**Solutions:**
+- Press N to toggle sidebar
+- Switch to Object Mode
+- Scroll through sidebar tabs
+- Verify addon enabled (green checkbox)
 
 ### Operators Not Working
-- Make sure you have at least one object selected
-- Verify you're in the 3D Viewport (not other editors)
-- Check the Blender console (`Window > Toggle System Console` on Windows) for error messages
+
+**Cause:** No objects selected or wrong context
+
+**Solutions:**
+- Select at least one mesh object
+- Verify 3D Viewport active
+- Check System Console for errors
+- Disable and re-enable addon
+- Verify Blender version 4.0+
 
 ### Performance Issues
-- Reduce the number of selected objects
-- Disable "Auto-Select Coplanar" if working with very dense meshes
-- Lower the viewport quality settings in Blender preferences
 
-## Updating the Addon
+**Cause:** High polygon count or many objects
 
-To update to a newer version:
+**Solutions:**
+- Reduce selected object count
+- Disable Auto-Select Coplanar for dense meshes
+- Lower viewport quality (Edit > Preferences > Viewport)
+- Update GPU drivers
 
-1. **Disable the addon** in Preferences
-2. **Remove the old folder** from the addons directory
-3. **Copy the new version** following the installation steps above
-4. **Re-enable the addon**
+### Python Errors
 
-Your settings and preferences will be preserved between updates.
+**Cause:** Missing or corrupted files
+
+**Solutions:**
+- Download fresh copy from releases
+- Verify all files present
+- Check file permissions
+- Try different install location
+
+## Updating
+
+1. Disable addon (Edit > Preferences > Add-ons)
+2. Close Blender
+3. Delete old `Cursor_BBox` folder
+4. Install new version
+5. Restart Blender
+6. Re-enable addon
+
+!!! tip
+    Settings preserved in Blender user config.
+
+## Uninstalling
+
+1. Disable addon in Preferences
+2. Close Blender
+3. Delete `Cursor_BBox` folder from addons directory
+4. Restart Blender
+
+## Support
+
+- [Usage Guide](usage.md) — Workflow documentation
+- [GitHub Issues](https://github.com/TitusLVR/Cursor_BBox/issues) — Bug reports
+
+**Issue Template:**
+- Blender version
+- Operating system
+- Steps to reproduce
+- Console error messages

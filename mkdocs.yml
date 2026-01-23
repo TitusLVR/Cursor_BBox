@@ -1,26 +1,21 @@
 site_name: Cursor BBox Documentation
 site_url: https://tituslvr.github.io/Cursor_BBox/
+site_author: Titus
 site_dir: site
 docs_dir: docs
 
 repo_url: https://github.com/TitusLVR/Cursor_BBox
 repo_name: TitusLVR/Cursor_BBox
 
-extra_css:
-  - docs/overrides/stylesheets/extra.css
-
 theme:
   name: material
-  custom_dir: docs/overrides
   palette:
-    # Dark theme
     - scheme: slate
       primary: blue-grey
       accent: blue-grey
       toggle:
         icon: material/brightness-7
         name: Switch to light mode
-    # Light theme (fallback)
     - scheme: default
       primary: blue-grey
       accent: blue-grey
@@ -28,17 +23,27 @@ theme:
         icon: material/brightness-4
         name: Switch to dark mode
   features:
-    - navigation.sections
-    - navigation.expand
-    - navigation.top
-    - navigation.index
     - navigation.instant
-    - navigation.sidebar
+    - navigation.sections
+    - navigation.top
     - search.suggest
     - search.highlight
-    - content.code.annotate
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
 
 nav:
   - Home: index.md
   - Installation: installation.md
   - Usage: usage.md
+
