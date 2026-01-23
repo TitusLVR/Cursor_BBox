@@ -131,7 +131,7 @@ def get_marked_points_info():
 # ===== FACE MARKING =====
 
 def mark_faces_batch(obj, face_indices, use_depsgraph=False):
-    """Efficiently mark multiple faces at once, optionally using evaluated mesh"""
+    """Efficiently mark multiple faces at once - uses mesh tessellation for correct triangles"""
     global _state
     from .utils import get_evaluated_mesh
     
@@ -151,25 +151,22 @@ def mark_faces_batch(obj, face_indices, use_depsgraph=False):
         return
     
     vertices = []
+    face_indices_set = set(face_indices)
     
     # Get evaluated mesh using shared utility
     mesh, obj_mat = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph)
     
-    # Process all faces in one pass
-    for face_idx in face_indices:
-        if face_idx >= len(mesh.polygons):
-            continue
-        
-        face = mesh.polygons[face_idx]
-        face_verts = [obj_mat @ mesh.vertices[i].co for i in face.vertices]
-        
-        # Triangulate if needed
-        if len(face_verts) == 3:
-            vertices.extend(face_verts)
-        else:
-            # Fan triangulation
-            for i in range(1, len(face_verts) - 1):
-                vertices.extend([face_verts[0], face_verts[i], face_verts[i + 1]])
+    # Ensure mesh has calculated tessellation
+    mesh.calc_loop_triangles()
+    
+    # Use loop_triangles which provides correct triangulation for all face types
+    # including concave faces, ngons, and faces with holes
+    for tri in mesh.loop_triangles:
+        if tri.polygon_index in face_indices_set:
+            # Add the three vertices of this triangle in world space
+            for loop_idx in tri.loops:
+                vert_idx = mesh.loops[loop_idx].vertex_index
+                vertices.append(obj_mat @ mesh.vertices[vert_idx].co)
     
     # Update visual cache with new vertices
     if vertices:
@@ -282,7 +279,7 @@ def force_refresh_marked_faces():
             mark_faces_batch(obj, face_indices)
 
 def update_preview_faces(obj, face_indices, use_depsgraph=False):
-    """Update faces preview (transient highlight)"""
+    """Update faces preview (transient highlight) - uses mesh tessellation for correct triangles"""
     global _state
     from .utils import get_evaluated_mesh
     
@@ -294,25 +291,22 @@ def update_preview_faces(obj, face_indices, use_depsgraph=False):
         return
         
     vertices = []
+    face_indices_set = set(face_indices)
     
     # Get evaluated mesh using shared utility
     mesh, obj_mat = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph)
     
-    # Process faces - use simple fan triangulation like marked faces
-    for face_idx in face_indices:
-        if face_idx >= len(mesh.polygons):
-            continue
-        
-        face = mesh.polygons[face_idx]
-        face_verts = [obj_mat @ mesh.vertices[i].co for i in face.vertices]
-        
-        # Triangulate if needed (same method as marked faces)
-        if len(face_verts) == 3:
-            vertices.extend(face_verts)
-        else:
-            # Fan triangulation
-            for i in range(1, len(face_verts) - 1):
-                vertices.extend([face_verts[0], face_verts[i], face_verts[i + 1]])
+    # Ensure mesh has calculated tessellation
+    mesh.calc_loop_triangles()
+    
+    # Use loop_triangles which provides correct triangulation for all face types
+    # including concave faces, ngons, and faces with holes
+    for tri in mesh.loop_triangles:
+        if tri.polygon_index in face_indices_set:
+            # Add the three vertices of this triangle in world space
+            for loop_idx in tri.loops:
+                vert_idx = mesh.loops[loop_idx].vertex_index
+                vertices.append(obj_mat @ mesh.vertices[vert_idx].co)
     
     if vertices:
         _state.preview_faces_visual_cache[obj.name] = vertices

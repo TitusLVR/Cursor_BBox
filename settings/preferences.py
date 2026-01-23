@@ -39,7 +39,7 @@ class CursorBBoxPreferences(AddonPreferences):
         name="Face Marking Color",
         description="Color for marked faces",
         subtype='COLOR',
-        default=(0.318, 0.667, 0.984),  # #51AAFB converted to RGB
+        default=(0.984, 0.122, 0.483),  # #51AAFB converted to RGB
         min=0.0,
         max=1.0
     )
@@ -76,7 +76,7 @@ class CursorBBoxPreferences(AddonPreferences):
         name="BBox Preview Color",
         description="Color for bounding box preview",
         subtype='COLOR',
-        default=(1.0, 1.0, 1.0),  # #FFFFFF converted to RGB
+        default=(0.750, 0.750, 0.750),  # #FFFFFF converted to RGB
         min=0.0,
         max=1.0
     )
@@ -84,7 +84,7 @@ class CursorBBoxPreferences(AddonPreferences):
     bbox_preview_alpha: FloatProperty(
         name="BBox Preview Alpha",
         description="Transparency for bounding box preview wireframe",
-        default=0.8,
+        default=0.75,
         min=0.0,
         max=1.0
     )
@@ -116,7 +116,7 @@ class CursorBBoxPreferences(AddonPreferences):
         name="Preview Faces Color",
         description="Color for face hover preview (when hovering over faces)",
         subtype='COLOR',
-        default=(0.0, 1.0, 1.0),  # Cyan
+        default=(0.275, 1.0, 0.706),  # Cyan
         min=0.0,
         max=1.0
     )
@@ -134,7 +134,7 @@ class CursorBBoxPreferences(AddonPreferences):
         name="Preview Point Color",
         description="Color for point preview (when hovering in add point mode)",
         subtype='COLOR',
-        default=(0.0, 1.0, 0.0),  # Green
+        default=(1.0, 0.48, 0.0),  # Green
         min=0.0,
         max=1.0
     )
