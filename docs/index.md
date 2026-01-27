@@ -7,7 +7,7 @@ Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to t
 ## Links
 
 - [GitHub Repository](https://github.com/TitusLVR/Cursor_BBox) | [Releases](https://github.com/TitusLVR/Cursor_BBox/releases)
-- [Installation](installation.md) | [Usage](usage.md)
+- [Installation](installation.md)
 
 ## Key Features
 
@@ -17,7 +17,7 @@ Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to t
 - **Visual Feedback**: Real-time wireframe previews and snapping indicators.
 - **Customization**: Adjustable push offset, material assignment, and auto-alignment settings.
 
-## Operators
+
 
 ## Controls
 

@@ -4,7 +4,7 @@
 
 Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to the 3D cursor with face marking and coplanar selection.
 
-**[Documentation](https://tituslvr.github.io/Cursor_BBox/)** | **[Installation](https://tituslvr.github.io/Cursor_BBox/installation/)** | **[Usage](https://tituslvr.github.io/Cursor_BBox/usage/)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
+**[Documentation](https://tituslvr.github.io/Cursor_BBox/)** | **[Installation](https://tituslvr.github.io/Cursor_BBox/installation/)** | **[Controls](https://tituslvr.github.io/Cursor_BBox/#controls)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
 
 ## Key Features
 

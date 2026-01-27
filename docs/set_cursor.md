@@ -1,6 +1,11 @@
 # Set Cursor
 
-Raycast-based cursor placement tools.
+Set cursor location and rotation aligned to surface.
 
-- **Description**: Places the cursor on surface normals without creating geometry.
-- **Usage**: Hover over a surface and click to place.
+- **Description**: Raycast-based cursor placement tool. Supports edge and vertex snapping.
+- **Controls**:
+  - `LMB`: Place Cursor
+  - `Scroll`: Cycle Edge Alignment
+  - `S`: Toggle Snap (to vertex/edge/face center)
+  - `RMB`: Done / Exit
+  - `ESC`: Cancel

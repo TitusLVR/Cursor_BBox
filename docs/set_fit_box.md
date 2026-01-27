@@ -1,6 +1,15 @@
 # Set & Fit Box
 
-Instantly sets the cursor and fits a bounding box to the current selection.
+Set cursor and immediately fit a Bounding Box.
 
-- **Type**: Non-modal (One-click)
-- **Description**: Uses current settings to immediately generate a box.
+- **Description**: Quickly places the cursor and generates a box in one action. Works with multiple objects.
+- **Controls**:
+  - `LMB`: Create Box (on hovered object)
+  - `E`: Toggle Extend Mode
+  - `G`: Create Combined Box (for all selected)
+  - `A`: Create Individual Boxes (for all selected)
+  - `W`: Toggle World Orientation
+  - `Q`: Toggle Local Orientation
+  - `D`: Toggle Depsgraph (Modifiers)
+  - `RMB`: Done / Exit
+  - `ESC`: Cancel
