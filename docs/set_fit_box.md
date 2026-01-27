@@ -3,6 +3,8 @@
 Set cursor and immediately fit a Bounding Box.
 
 - **Description**: Quickly places the cursor and generates a box in one action. Works with multiple objects.
+
+![Set Fit Box Demo](img/AutoFit_Individual.gif)
 - **Controls**:
   - `LMB`: Create Box (on hovered object)
   - `E`: Toggle Extend Mode

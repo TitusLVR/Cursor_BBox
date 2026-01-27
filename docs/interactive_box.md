@@ -3,6 +3,8 @@
 Fit a Bounding Box around marked faces or active object.
 
 - **Description**: Places cursor and creates a bounding box with face marking support.
+
+![Interactive Box Demo](img/Interactive_Box_01.gif)
 - **Controls**:
   - `Space`: Create Box
   - `LMB`: Mark Face

@@ -3,6 +3,8 @@
 Fit a Convex Hull around marked faces.
 
 - **Description**: Generates a convex hull mesh from marked faces and points.
+
+![Interactive Hull Demo](img/Interactive_Hull_01.gif)
 - **Controls**:
   - `Space`: Create Hull
   - `LMB`: Mark Face
