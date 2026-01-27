@@ -2,49 +2,31 @@
 
 # Cursor Aligned Bounding Box
 
-Blender addon for cursor-aligned bounding shape creation with face marking and coplanar selection.
+Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to the 3D cursor with face marking and coplanar selection.
 
-**[Documentation](https://tituslvr.github.io/Cursor_BBox/)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)** | **[Source](https://github.com/TitusLVR/Cursor_BBox)**
+**[Documentation](docs/index.md)** | **[Installation](docs/installation.md)** | **[Usage](docs/usage.md)** | **[Releases](https://github.com/TitusLVR/Cursor_BBox/releases)**
 
-## Features
+## Key Features
 
-**Operators**
-- Interactive Box — Fit bounding box around marked faces or active object
-- Interactive Hull — Fit convex hull around marked faces
-- Interactive Sphere — Fit bounding sphere around marked faces
-- Set & Fit Box — Set cursor and immediately fit bounding box
-- Set Cursor — Set cursor location and rotation aligned to surface
+- **Interactive Placement**: Raycast-based cursor alignment to faces and edges.
+- **Bounding Shapes**: Box, Convex Hull, and Sphere generation.
+- **Smart Selection**: Face marking, coplanar face detection, and custom point addition.
+- **Visual Feedback**: Real-time wireframe previews and snapping indicators.
 
-**Marking & Selection**
-- Face marking with LMB or F key
-- Coplanar face selection with adjustable angle threshold
-- Custom point addition for precise bounds
-- Visual feedback (red faces, green edges)
+## Operators
 
-**Configuration**
-- Push offset for geometry inflation/deflation
-- Material and color assignment
-- Collection organization
-- Custom object naming
+| Operator | Description |
+| :--- | :--- |
+| **Interactive Box** | Create a cursor-aligned bounding box. Supports face marking and edge rotation. |
+| **Interactive Hull** | Generate a convex hull from marked faces and points. |
+| **Interactive Sphere** | Create a minimum bounding sphere for marked geometry. |
+| **Set & Fit Box** | Keep it simple. Instantly sets cursor and fits a box to selection. |
+| **Set Cursor** | Raycast-based cursor placement without geometry creation. |
 
-## Installation
+## Quick Start
 
-1. Copy `Cursor_BBox` folder to Blender addons directory
-2. Enable in Edit > Preferences > Add-ons
-3. Access panel via N key in 3D Viewport
+1. **Install**: Copy the `Cursor_BBox` folder to your Blender addons directory or install the `.zip`.
+2. **Access**: Open the **N-Panel** in the 3D Viewport and look for the `Cursor BBox` tab.
+3. **Usage**: Select an object, choose an operator (e.g., **Interactive Box**), and use `Space` to confirm.
 
-**Addon Paths**
-- Windows: `%APPDATA%\Blender Foundation\Blender\[Version]\scripts\addons\`
-- macOS: `~/Library/Application Support/Blender/[Version]/scripts/addons/`
-- Linux: `~/.config/blender/[Version]/scripts/addons/`
-
-## Requirements
-
-- Blender 4.0 or higher
-- GPU with OpenGL support
-
-## Documentation
-
-- [Installation Guide](https://tituslvr.github.io/Cursor_BBox/installation/) — Setup and troubleshooting
-- [Usage Guide](https://tituslvr.github.io/Cursor_BBox/usage/) — Controls and workflows
-- [GitHub Issues](https://github.com/TitusLVR/Cursor_BBox/issues) — Bug reports and feature requests
+**Requirements**: Blender 4.0+

@@ -7,7 +7,7 @@ Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to t
 ## Links
 
 - [GitHub Repository](https://github.com/TitusLVR/Cursor_BBox) | [Releases](https://github.com/TitusLVR/Cursor_BBox/releases)
-- [Installation](installation.md) | [Usage & API](usage.md)
+- [Installation](installation.md) | [Usage](usage.md)
 
 ## Key Features
 
@@ -21,11 +21,11 @@ Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to t
 
 | Operator | Description |
 | :--- | :--- |
-| **Interactive Box** | Create a cursor-aligned bounding box. Supports face marking and edge rotation. |
-| **Interactive Hull** | Generate a convex hull from marked faces and points. |
-| **Interactive Sphere** | Create a minimum bounding sphere for marked geometry. |
-| **Set & Fit Box** | Non-modal. Instantly sets cursor and fits a box to selection. |
-| **Set Cursor** | Raycast-based cursor placement without geometry creation. |
+| [**Interactive Box**](usage.md#interactive-box) | Create a cursor-aligned bounding box. Supports face marking and edge rotation. |
+| [**Interactive Hull**](usage.md#interactive-hull) | Generate a convex hull from marked faces and points. |
+| [**Interactive Sphere**](usage.md#interactive-sphere) | Create a minimum bounding sphere for marked geometry. |
+| [**Set & Fit Box**](usage.md#set--fit-box) | Non-modal. Instantly sets cursor and fits a box to selection. |
+| [**Set Cursor**](usage.md#set-cursor) | Raycast-based cursor placement without geometry creation. |
 
 ## Behavior
 - **Modes**: Designed for **Object Mode**. In **Edit Mode**, operators calculate bounds based on pre-selected faces.

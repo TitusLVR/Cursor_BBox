@@ -46,3 +46,28 @@ Located in the **Cursor BBox** tab.
 - **Selection**: Select objects *before* starting an operator.
 - **Marking**: In Hull/Sphere modes, if no faces are marked, the operation may fail or do nothing.
 - **Performance**: High-poly meshes may lag with `Auto-Select Coplanar` enabled. Use `C` to toggle it only when needed.
+
+## Operators
+
+### Interactive Box
+Fits a bounding box around marked faces or the active object.
+- **Controls**: `Mouse Wheel` to rotate, `S` to snap, `F` or `LMB` to mark faces.
+
+### Interactive Hull
+Generates a convex hull from marked faces and points.
+- **Controls**: `C` for Coplanar, `A` for points.
+
+### Interactive Sphere
+Fits a minimum bounding sphere around marked geometry.
+- **Controls**: `LMB` to mark, `A` for points.
+
+### Set & Fit Box
+Non-modal tool. Instantly sets the cursor and fits a bounding box to the current selection.
+
+### Set Cursor
+Tools for placing the cursor on surfaces with raycasting, without creating geometry.
+
+## Support
+- [Installation Guide](installation.md)
+- [GitHub Issues](https://github.com/TitusLVR/Cursor_BBox/issues)
+- [Releases](https://github.com/TitusLVR/Cursor_BBox/releases)
