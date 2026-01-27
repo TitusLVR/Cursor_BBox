@@ -19,13 +19,32 @@ Blender addon for creating bounding volumes (boxes, hulls, spheres) aligned to t
 
 ## Operators
 
-| Operator | Description |
-| :--- | :--- |
-| [**Interactive Box**](usage.md#interactive-box) | Create a cursor-aligned bounding box. Supports face marking and edge rotation. |
-| [**Interactive Hull**](usage.md#interactive-hull) | Generate a convex hull from marked faces and points. |
-| [**Interactive Sphere**](usage.md#interactive-sphere) | Create a minimum bounding sphere for marked geometry. |
-| [**Set & Fit Box**](usage.md#set--fit-box) | Non-modal. Instantly sets cursor and fits a box to selection. |
-| [**Set Cursor**](usage.md#set-cursor) | Raycast-based cursor placement without geometry creation. |
+## Controls
+
+| Key | Action | Details |
+| :--- | :--- | :--- |
+| **Space** / **Enter** | Confirm | Create the bounding shape and exit |
+| **ESC** | Cancel | Exit without creating geometry |
+| **S** | Snap | Snap cursor to nearest vertex, edge center, or face center |
+| **F** | Mark Face | Toggle face marking (Box mode) |
+| **A** | Add Point | Add a custom point at cursor location (Hull/Sphere) |
+| **C** | Coplanar / Plane | Toggle coplanar selection (Normal) or Construction Plane (Point Mode) |
+| **Z** | Clear | Clear all marked faces and points |
+| **Shift+Alt+C** | Pie Menu | Open addon pie menu (Global) |
+| **Mouse Wheel** | Rotate | Cycle cursor rotation (Box mode) |
+| **Shift + Wheel** | Angle | Adjust coplanar angle threshold |
+
+## Parameters (N-Panel)
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| **Push Offset** | `0.01` | Inflation margin for generated geometry. Negative values shrink. |
+| **Align to Face** | `True` | Automatically align cursor rotation to face normals. |
+| **Auto-Select Coplanar** | `False` | Enable coplanar selection by default on startup. |
+| **Angle Threshold** | `5°` | Angular tolerance for coplanar face detection. |
+| **Use Material** | `False` | Assign a debug material to created meshes. |
+| **Color** | `Orange` | Color for debug material and UI highlights. |
+| **Collection** | `CursorBBox` | Name of the collection where shapes are created. |
 
 ## Behavior
 - **Modes**: Designed for **Object Mode**. In **Edit Mode**, operators calculate bounds based on pre-selected faces.

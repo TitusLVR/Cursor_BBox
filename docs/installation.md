@@ -23,14 +23,3 @@
 ## Configuration
 - **Location**: 3D Viewport Sidebar (N-Panel) > `Cursor BBox` tab.
 - **Shortcuts**: Default Pie Menu is `Shift+Alt+C`. Can be changed in Keymap preferences.
-
-## Troubleshooting
-
-| Issue | Solution |
-| :--- | :--- |
-| **Addon not listed** | Ensure the folder structure is `.../addons/Cursor_BBox/__init__.py`. |
-| **Panel missing** | Check if enabled in Preferences. Press `N` in 3D Viewport. |
-| **Errors on use** | Ensure an object is selected. Check Window > Toggle System Console for logs. |
-
-## Updating
-Disable the addon, close Blender, remove the old folder, install the new version, and restart Blender.

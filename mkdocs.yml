@@ -45,5 +45,9 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Installation: installation.md
-  - Usage: usage.md
+  - Interactive Box: interactive_box.md
+  - Interactive Hull: interactive_hull.md
+  - Interactive Sphere: interactive_sphere.md
+  - Set & Fit Box: set_fit_box.md
+  - Set Cursor: set_cursor.md
 
