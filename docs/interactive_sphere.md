@@ -5,6 +5,8 @@ Fit a Sphere around marked faces.
 - **Description**: Creates a minimum bounding sphere encompassing marked geometry.
 
 ![Interactive Sphere Demo](img/interactive_Sphere_01.gif)
+
+
 - **Controls**:
 
   - `Space`: Create Sphere
