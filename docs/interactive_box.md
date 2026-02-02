@@ -6,6 +6,7 @@ Fit a Bounding Box around marked faces or active object.
 
 ![Interactive Box Demo](img/Interactive_Box_01.gif)
 - **Controls**:
+
   - `Space`: Create Box
   - `LMB`: Mark Face
   - `Mouse Wheel`: Rotate Box
@@ -20,6 +21,7 @@ Fit a Bounding Box around marked faces or active object.
   - `ESC`: Cancel
 
 - **Point Mode Controls**: (Press `A` to enter)
+
   - `LMB`: Add Point
   - `S`: Toggle Snap
   - `C`: Toggle Limitation Plane

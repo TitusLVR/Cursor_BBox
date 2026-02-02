@@ -6,6 +6,7 @@ Fit a Convex Hull around marked faces.
 
 ![Interactive Hull Demo](img/Interactive_Hull_01.gif)
 - **Controls**:
+
   - `Space`: Create Hull
   - `LMB`: Mark Face
   - `A`: Toggle Point Mode (Add Points)
@@ -19,6 +20,7 @@ Fit a Convex Hull around marked faces.
   - `ESC`: Cancel
 
 - **Point Mode Controls**: (Press `A` to enter)
+
   - `LMB`: Add Point
   - `S`: Toggle Snap
   - `C`: Toggle Limitation Plane

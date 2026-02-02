@@ -6,6 +6,7 @@ Fit a Sphere around marked faces.
 
 ![Interactive Sphere Demo](img/interactive_Sphere_01.gif)
 - **Controls**:
+
   - `Space`: Create Sphere
   - `LMB`: Mark Face
   - `A`: Toggle Point Mode (Add Points)
@@ -19,6 +20,7 @@ Fit a Sphere around marked faces.
   - `ESC`: Cancel
 
 - **Point Mode Controls**: (Press `A` to enter)
+
   - `LMB`: Add Point
   - `S`: Toggle Snap
   - `C`: Toggle Limitation Plane

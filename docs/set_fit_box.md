@@ -6,6 +6,7 @@ Set cursor and immediately fit a Bounding Box.
 
 ![Set Fit Box Demo](img/AutoFit_Individual.gif)
 - **Controls**:
+
   - `LMB`: Create Box (on hovered object)
   - `E`: Toggle Extend Mode
   - `G`: Create Combined Box (for all selected)
