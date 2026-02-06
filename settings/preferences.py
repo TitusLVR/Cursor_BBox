@@ -10,10 +10,11 @@ class CursorBBoxPreferences(AddonPreferences):
     active_tab: EnumProperty(
         name="Active Tab",
         items=[
+            ('SETTINGS', "Settings", "General addon settings"),
             ('KEYMAPS', "Keymaps", "Edit keyboard shortcuts"),
             ('UI', "UI", "Customize colors and appearance"),
         ],
-        default='KEYMAPS'
+        default='SETTINGS'
     )
     
     # Edge highlight settings - Updated to #46FFB4
@@ -146,6 +147,13 @@ class CursorBBoxPreferences(AddonPreferences):
         min=0.0,
         max=1.0
     )
+
+    # General Settings
+    use_depsgraph: BoolProperty(
+        name="Use Depsgraph",
+        description="Use evaluated dependency graph for raycasting and operations (slower but supports modifiers)",
+        default=True
+    )
     
     def draw(self, context):
         layout = self.layout
@@ -155,7 +163,31 @@ class CursorBBoxPreferences(AddonPreferences):
         row.prop(self, "active_tab", expand=True)
         layout.separator()
         
-        if self.active_tab == 'UI':
+        if self.active_tab == 'SETTINGS':
+             # General Settings
+            box = layout.box()
+            box.label(text="General Settings:", icon='PREFERENCES')
+            
+            row = box.row()
+            row.prop(self, "use_depsgraph")
+            
+        elif self.active_tab == 'KEYMAPS':
+            # Keymap shortcuts
+            box = layout.box()
+            box.label(text="Keyboard Shortcuts:", icon='KEY_HLT')
+            kc = bpy.context.window_manager.keyconfigs.addon
+            col = box.column()
+            if kc:
+                import sys
+                import rna_keymap_ui
+                addon_main = sys.modules[__package__.split('.')[0]]
+                for km, kmi in getattr(addon_main, "addon_keymaps", []):
+                    col.context_pointer_set("keymap", km)
+                    rna_keymap_ui.draw_kmi([], kc, km, kmi, col, 0)
+            else:
+                col.label(text="Keyconfig not found", icon='ERROR')
+
+        elif self.active_tab == 'UI':
             # BBox preview settings
             box = layout.box()
             box.label(text="Bounding Box Preview:", icon='GHOST_ENABLED')
@@ -239,22 +271,6 @@ class CursorBBoxPreferences(AddonPreferences):
             
             row = box.row()
             row.prop(self, "bbox_show_all_edges")
-            
-        elif self.active_tab == 'KEYMAPS':
-            # Keymap shortcuts
-            box = layout.box()
-            box.label(text="Keyboard Shortcuts:", icon='KEY_HLT')
-            kc = bpy.context.window_manager.keyconfigs.addon
-            col = box.column()
-            if kc:
-                import sys
-                import rna_keymap_ui
-                addon_main = sys.modules[__package__.split('.')[0]]
-                for km, kmi in getattr(addon_main, "addon_keymaps", []):
-                    col.context_pointer_set("keymap", km)
-                    rna_keymap_ui.draw_kmi([], kc, km, kmi, col, 0)
-            else:
-                col.label(text="Keyconfig not found", icon='ERROR')
 
 def get_preferences():
     """Get addon preferences"""

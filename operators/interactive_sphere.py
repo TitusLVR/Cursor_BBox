@@ -51,6 +51,7 @@ from ..functions.core import (
     enable_limitation_plane_wrapper as enable_limitation_plane,
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
+from ..settings.preferences import get_preferences
 
 def create_bounding_sphere_from_marked(marked_faces_dict, marked_points=None, select_new_object=True, use_depsgraph=False):
     """Create a bounding sphere from marked faces and points"""
@@ -795,6 +796,13 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         self.limit_plane_mode = False
         self.limitation_plane_matrix = None
         self.instance_data = {}
+        
+        # Get use_depsgraph from preferences
+        prefs = get_preferences()
+        if prefs:
+            self.use_depsgraph = prefs.use_depsgraph
+        else:
+            self.use_depsgraph = True # Default fallback
         
         # Check for immediate execution in Edit Mode
         if context.mode == 'EDIT_MESH':

@@ -816,6 +816,13 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         self.limitation_plane_matrix = None
         self.instance_data = {}
 
+        # Get use_depsgraph from preferences
+        prefs = get_preferences()
+        if prefs:
+            self.use_depsgraph = prefs.use_depsgraph
+        else:
+            self.use_depsgraph = True # Default fallback
+
         # Check for immediate execution in Edit Mode
         if context.mode == 'EDIT_MESH':
             self.marked_faces = get_selected_faces_from_edit_mode(context)
