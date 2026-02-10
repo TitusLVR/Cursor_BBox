@@ -4,6 +4,9 @@ import mathutils
 from mathutils import Vector
 from math import radians, degrees
 from ..functions.utils import (
+    restore_selection_state,
+    set_cursor_rotation_to_principal_plane,
+    CURSOR_PLANE_ALIGNMENTS,
     get_face_edges_from_raycast,
     select_edge_by_scroll,
     place_cursor_with_raycast_and_edge,
@@ -11,6 +14,7 @@ from ..functions.utils import (
     get_connected_coplanar_faces,
     project_point_to_plane_intersection,
     calculate_plane_edge_intersections,
+    calculate_plane_edge_intersections_multi,
     ensure_cbb_collection,
     ensure_cbb_material,
     assign_object_styles,
@@ -20,7 +24,8 @@ from ..functions.utils import (
     get_faces_to_process,
     is_collection_instance,
     make_collection_instance_real,
-    cleanup_collection_instance_temp
+    cleanup_collection_instance_temp,
+    compute_thickness_selection_to_cursor,
 )
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
@@ -48,6 +53,8 @@ from ..functions.core import (
     get_preview_culling,
     update_preview_point,
     clear_preview_point,
+    update_snap_targets_preview,
+    clear_snap_targets_preview,
     update_limitation_plane,
     clear_limitation_plane,
     enable_limitation_plane_wrapper as enable_limitation_plane,
@@ -56,8 +63,8 @@ from ..functions.core import (
 from ..settings.preferences import get_preferences
 
 
-def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False):
-    """Create a convex hull from marked faces and points"""
+def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False, face_thickness=0.0):
+    """Create a convex hull from marked faces and points. face_thickness offsets face vertices along normals (extrusion-like)."""
     from ..functions.utils import collect_vertices_from_marked_faces
     
     context = bpy.context
@@ -66,8 +73,10 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
     original_active = context.view_layer.objects.active
     original_selected = list(context.selected_objects)
     
-    # Collect vertices from marked faces using shared utility
-    all_vertices = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph, context=context)
+    # Collect vertices from marked faces using shared utility (with optional thickness offset)
+    all_vertices = collect_vertices_from_marked_faces(
+        marked_faces_dict, use_depsgraph=use_depsgraph, context=context, face_thickness=face_thickness
+    )
     
     # Add marked points
     if marked_points:
@@ -216,6 +225,16 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         precision=3
     )
     
+    face_thickness: bpy.props.FloatProperty(
+        name="Face Thickness",
+        description="Offset selected faces along their normals (extrusion-like). Can be positive (outward) or negative (inward)",
+        default=0.0,
+        soft_min=-2.0,
+        soft_max=2.0,
+        precision=4,
+        step=0.01
+    )
+    
     align_to_face: bpy.props.BoolProperty(
         name="Align to Face",
         description="Align cursor rotation to face normal",
@@ -229,6 +248,8 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         max=500,
         description="Distance in pixels to snap to elements"
     )
+    snap_mode: bpy.props.IntProperty(name="Snap Mode", default=1, min=0, max=3)  # 1=vertex default, 0=all, 2=edge, 3=face
+    cursor_plane_align: bpy.props.IntProperty(name="Cursor Plane", default=0, min=0, max=2)  # 0=XY, 1=YZ, 2=XZ (R cycles)
     
     current_edge_index: bpy.props.IntProperty(default=0)
     current_face_data = None
@@ -276,6 +297,12 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             cleanup_collection_instance_temp(context, instance_info)
         self.instance_data.clear()
     
+    def _get_preview_thickness(self):
+        """Thickness used for hull preview: cursor-based when From Cursor is on, else manual value."""
+        if self.thickness_mode and getattr(self, 'thickness_from_cursor', False):
+            return getattr(self, '_thickness_cursor_value', self.face_thickness)
+        return self.face_thickness
+    
     def modal(self, context, event):
         # Update status bar
         has_marked = bool(self.marked_faces)
@@ -286,18 +313,32 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             if has_marked: parts.append("Faces")
             if has_points: parts.append(f"{len(self.marked_points)} Points")
             status_text += f" | Marked: {', '.join(parts)}"
+        # Thickness: in thickness mode preview follows cursor; else show stored value
+        if not self.thickness_mode:
+            if abs(self.face_thickness) > 1e-5:
+                status_text += f" | T: Thickness ({self.face_thickness:.3f})"
+            else:
+                status_text += " | T: Thickness Mode"
         
         deps_state = "ON" if self.use_depsgraph else "OFF"
         coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
         backface_state = "ON" if get_backface_rendering() else "OFF"
         preview_cull_state = "ON" if get_preview_culling() else "OFF"
-        preview_cull_state = "ON" if get_preview_culling() else "OFF"
         
         if self.point_mode:
             snap_state = "✓" if self.snap_enabled else "✗"
             limit_state = "✓" if self.limit_plane_mode else "✗"
+            mode_names = ("All", "Vert", "Edge", "Face")
+            snap_mode_str = mode_names[self.snap_mode]
+            plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
             context.area.header_text_set(
-                f"POINT MODE | LMB: Add | S: Snap {snap_state} | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
+                f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {snap_mode_str} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
+            )
+        elif self.thickness_mode:
+            preview_val = self._get_preview_thickness()
+            from_cursor_state = "ON" if getattr(self, 'thickness_from_cursor', False) else "OFF"
+            context.area.header_text_set(
+                f"THICKNESS MODE | Preview: {preview_val:.3f} | C: From Cursor {from_cursor_state} | LMB: Place Cursor | R: Reset 0 | Alt+Scroll: Adjust | T: Exit | RMB: Done | ESC: Cancel"
             )
         else:
             context.area.header_text_set(
@@ -305,29 +346,140 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                 f"D: Deps {deps_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
             )
         
+        # Snap mode 1=Vertex, 2=Edge, 3=Face (point mode only)
+        if self.point_mode and event.value == 'PRESS':
+            if event.type in ('ONE', 'NUMPAD_1'):
+                self.snap_mode = 1
+                self.report({'INFO'}, "Snap: Vertex only")
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            if event.type in ('TWO', 'NUMPAD_2'):
+                self.snap_mode = 2
+                self.report({'INFO'}, "Snap: Edge only")
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            if event.type in ('THREE', 'NUMPAD_3'):
+                self.snap_mode = 3
+                self.report({'INFO'}, "Snap: Face only")
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+        # Thickness mode: C = toggle From Cursor (use cursor for preview or manual), R = reset to 0
+        if self.thickness_mode and not self.point_mode and event.value == 'PRESS':
+            if event.type == 'C':
+                self.thickness_from_cursor = not getattr(self, 'thickness_from_cursor', False)
+                state = "ON" if self.thickness_from_cursor else "OFF"
+                self.report({'INFO'}, f"From Cursor: {state}")
+                update_marked_faces_convex_hull(
+                    self.marked_faces, self.push_value,
+                    marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                    face_thickness=self._get_preview_thickness()
+                )
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            if event.type == 'R':
+                # Reset thickness to 0
+                self.face_thickness = 0.0
+                self._thickness_cursor_value = 0.0
+                self.report({'INFO'}, "Thickness reset to 0")
+                update_marked_faces_convex_hull(
+                    self.marked_faces, self.push_value,
+                    marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                    face_thickness=0.0
+                )
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+        # Reset cursor rotation to principal plane (R) - point mode only
+        if self.point_mode and event.type == 'R' and event.value == 'PRESS':
+            self.cursor_plane_align = (self.cursor_plane_align + 1) % 3
+            plane = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
+            set_cursor_rotation_to_principal_plane(context, plane)
+            if self.limit_plane_mode:
+                self.limitation_plane_matrix = context.scene.cursor.matrix.copy()
+                update_limitation_plane(self.limitation_plane_matrix)
+                origin = self.limitation_plane_matrix.to_translation()
+                normal = Vector(self.limitation_plane_matrix.col[2][:3])
+                self.cached_limit_intersections = []
+                if self.marked_faces:
+                    objects = list(self.marked_faces.keys())
+                    self.cached_limit_intersections = calculate_plane_edge_intersections_multi(
+                        objects, origin, normal, use_depsgraph=self.use_depsgraph
+                    )
+                elif context.active_object and context.active_object.type == 'MESH':
+                    self.cached_limit_intersections = calculate_plane_edge_intersections(
+                        context.active_object, origin, normal, use_depsgraph=self.use_depsgraph
+                    )
+            self.report({'INFO'}, f"Cursor: {plane}")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        # E: Set cursor location only (to current hover/snap position) and update limitation plane
+        if self.point_mode and event.type == 'E' and event.value == 'PRESS':
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+            if face_data:
+                cursor = context.scene.cursor
+                if self.snap_enabled:
+                    intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
+                    snap_result = snap_cursor_to_closest_element(
+                        context, event, face_data, threshold=self.snap_threshold,
+                        intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode
+                    )
+                    if not snap_result['success']:
+                        cursor.location = face_data['hit_location'].copy()
+                elif self.limit_plane_mode and self.limitation_plane_matrix:
+                    plane_origin = self.limitation_plane_matrix.to_translation()
+                    plane_normal = self.limitation_plane_matrix.col[2].to_3d()
+                    proj_pt = project_point_to_plane_intersection(
+                        face_data['hit_location'], face_data['face_normal'], plane_origin, plane_normal
+                    )
+                    if proj_pt:
+                        cursor.location = proj_pt
+                    else:
+                        cursor.location = face_data['hit_location'].copy()
+                else:
+                    cursor.location = face_data['hit_location'].copy()
+                if self.limit_plane_mode:
+                    self.limitation_plane_matrix = cursor.matrix.copy()
+                    update_limitation_plane(self.limitation_plane_matrix)
+                    origin = self.limitation_plane_matrix.to_translation()
+                    normal = Vector(self.limitation_plane_matrix.col[2][:3])
+                    self.cached_limit_intersections = []
+                    if self.marked_faces:
+                        objects = list(self.marked_faces.keys())
+                        self.cached_limit_intersections = calculate_plane_edge_intersections_multi(
+                            objects, origin, normal, use_depsgraph=self.use_depsgraph
+                        )
+                    elif context.active_object and context.active_object.type == 'MESH':
+                        self.cached_limit_intersections = calculate_plane_edge_intersections(
+                            context.active_object, origin, normal, use_depsgraph=self.use_depsgraph
+                        )
+                self.report({'INFO'}, "Cursor location updated")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
         # Limit Plane Toggle (C) - Point Mode Only
         if self.point_mode and event.type == 'C' and event.value == 'PRESS':
              self.limit_plane_mode = not self.limit_plane_mode
              if self.limit_plane_mode:
-                 # LOCK plane to current cursor
+                 # Always align limitation plane to cursor when pressing C
                  self.limitation_plane_matrix = context.scene.cursor.matrix.copy()
                  update_limitation_plane(self.limitation_plane_matrix)
                  enable_limitation_plane(context, self.limitation_plane_matrix)
-                
-                 # Calculate and cache edge intersections for snapping
                  self.cached_limit_intersections = []
-                 if context.active_object and context.active_object.type == 'MESH':
-                     origin = self.limitation_plane_matrix.to_translation()
-                     normal = self.limitation_plane_matrix.col[2][:3] 
-                     self.cached_limit_intersections = calculate_plane_edge_intersections(
-                         context.active_object, 
-                         mathutils.Vector(origin), 
-                         mathutils.Vector(normal),
-                         use_depsgraph=self.use_depsgraph
+                 origin = self.limitation_plane_matrix.to_translation()
+                 normal = Vector(self.limitation_plane_matrix.col[2][:3])
+                 if self.marked_faces:
+                     objects = list(self.marked_faces.keys())
+                     self.cached_limit_intersections = calculate_plane_edge_intersections_multi(
+                         objects, origin, normal, use_depsgraph=self.use_depsgraph
                      )
-                     self.report({'INFO'}, f"Limitation Plane ON | {len(self.cached_limit_intersections)} pts")
+                 elif context.active_object and context.active_object.type == 'MESH':
+                     self.cached_limit_intersections = calculate_plane_edge_intersections(
+                         context.active_object, origin, normal, use_depsgraph=self.use_depsgraph
+                     )
+                 self.report({'INFO'}, f"Limitation Plane ON | {len(self.cached_limit_intersections)} pts")
              else:
-                 self.limit_plane_mode = False
                  self.limitation_plane_matrix = None
                  clear_limitation_plane()
                  disable_limitation_plane(context)
@@ -336,6 +488,31 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
              context.area.tag_redraw()
              return {'RUNNING_MODAL'}
         
+        # Toggle Thickness Mode (T) - like point mode: dedicated mode, preview from cursor
+        if not self.point_mode and event.type == 'T' and event.value == 'PRESS':
+            self.thickness_mode = not self.thickness_mode
+            if self.thickness_mode:
+                # Enter: update cursor-based value (preview uses it only if From Cursor is ON)
+                cursor_loc = context.scene.cursor.location.copy()
+                self._thickness_cursor_value = compute_thickness_selection_to_cursor(
+                    self.marked_faces, cursor_loc, use_depsgraph=self.use_depsgraph
+                )
+                self.report({'INFO'}, "Thickness Mode: C=From Cursor toggle, R=Reset 0, Alt+Scroll=Adjust")
+            else:
+                # Exiting: keep current preview (cursor value if From Cursor was on, else manual)
+                if getattr(self, 'thickness_from_cursor', False):
+                    self.face_thickness = getattr(self, '_thickness_cursor_value', self.face_thickness)
+                self.report({'INFO'}, "Thickness Mode OFF")
+            # Preview uses _get_preview_thickness() (cursor or manual depending on From Cursor toggle)
+            eff = self._get_preview_thickness()
+            update_marked_faces_convex_hull(
+                self.marked_faces, self.push_value,
+                marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                face_thickness=eff
+            )
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
         # Toggle Depsgraph (D)
         if event.type == 'D' and event.value == 'PRESS':
             self.use_depsgraph = not self.use_depsgraph
@@ -344,8 +521,11 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                 rebuild_marked_faces_visual_data(obj, faces, use_depsgraph=self.use_depsgraph)
             
             # Update Preview
-            update_marked_faces_convex_hull(self.marked_faces, self.push_value, 
-                                   marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+            update_marked_faces_convex_hull(
+                self.marked_faces, self.push_value,
+                marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                face_thickness=self._get_preview_thickness()
+            )
             
             # Need to update preview if active
             # update_marked_faces_convex_hull likely needs update too - but I can't edit it yet as I haven't seen it in core.py fully.
@@ -379,6 +559,8 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         elif event.type == 'S' and event.value == 'PRESS':
             if self.point_mode:
                 self.snap_enabled = not self.snap_enabled
+                if not self.snap_enabled:
+                    clear_snap_targets_preview()
                 state_str = "ON" if self.snap_enabled else "OFF"
                 self.report({'INFO'}, f"Point Snap: {state_str}")
                 context.area.tag_redraw()
@@ -421,6 +603,25 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
+        # Thickness Adjustment (Alt + Scroll) - when thickness mode is on
+        if self.thickness_mode and not self.point_mode and event.alt and not event.ctrl and not event.shift:
+            if event.type == 'WHEELUPMOUSE':
+                self.face_thickness += 0.02
+                self._thickness_cursor_value = self.face_thickness
+                self.report({'INFO'}, f"Thickness: {self.face_thickness:.3f}")
+            elif event.type == 'WHEELDOWNMOUSE':
+                self.face_thickness -= 0.02
+                self._thickness_cursor_value = self.face_thickness
+                self.report({'INFO'}, f"Thickness: {self.face_thickness:.3f}")
+            if event.type in ('WHEELUPMOUSE', 'WHEELDOWNMOUSE'):
+                update_marked_faces_convex_hull(
+                    self.marked_faces, self.push_value,
+                    marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                    face_thickness=self.face_thickness
+                )
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
         # Snap Threshold Adjustment (Ctrl + Scroll) - Must be before navigation pass-through
         if event.ctrl and not event.shift and not event.alt:
             if event.type == 'WHEELUPMOUSE':
@@ -436,8 +637,10 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             if self.point_mode:
                 snap_state = "✓" if self.snap_enabled else "✗"
                 limit_state = "✓" if self.limit_plane_mode else "✗"
+                mode_names = ("All", "Vert", "Edge", "Face")
+                plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
                 context.area.header_text_set(
-                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
+                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {mode_names[self.snap_mode]} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
                 )
             else:
                 marking_status = f" ({len(self.marked_faces)} marked)" if self.marked_faces else ""
@@ -455,7 +658,10 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} and event.value == 'PRESS':
             
             if self.marked_faces or self.marked_points:
-                if create_convex_hull_from_marked(self.marked_faces, self.marked_points, self.push_value, select_new_object=False, use_depsgraph=self.use_depsgraph):
+                if create_convex_hull_from_marked(
+                    self.marked_faces, self.marked_points, self.push_value,
+                    select_new_object=False, use_depsgraph=self.use_depsgraph, face_thickness=self.face_thickness
+                ):
                     self.report({'INFO'}, "Created Convex Hull. Ready for new selection.")
                     # Clear markings after successful creation
                     clear_all_markings()
@@ -485,7 +691,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                     context, event, face_data, self.snap_enabled, 
                     self.limit_plane_mode, self.limitation_plane_matrix,
                     self.cached_limit_intersections, self.snap_threshold,
-                    use_depsgraph=self.use_depsgraph
+                    use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode
                 )
                 
                 if loc is None:
@@ -500,15 +706,36 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                 add_marked_point(loc)
                 
                 # Update Preview
-                update_marked_faces_convex_hull(self.marked_faces, self.push_value, 
-                                       marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                update_marked_faces_convex_hull(
+                    self.marked_faces, self.push_value,
+                    marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                    face_thickness=self._get_preview_thickness()
+                )
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+
+            # In thickness mode: LMB places cursor at raycast hit; preview updates only when From Cursor is ON
+            if self.thickness_mode:
+                face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+                if face_data:
+                    context.scene.cursor.location = face_data['hit_location'].copy()
+                    self._thickness_cursor_value = compute_thickness_selection_to_cursor(
+                        self.marked_faces, context.scene.cursor.location, use_depsgraph=self.use_depsgraph
+                    )
+                    if self.thickness_from_cursor:
+                        self.face_thickness = self._thickness_cursor_value
+                    update_marked_faces_convex_hull(
+                        self.marked_faces, self.push_value,
+                        marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                        face_thickness=self._get_preview_thickness()
+                    )
+                    self.report({'INFO'}, f"Cursor placed | Thickness: {self._thickness_cursor_value:.3f}")
                 context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
             # Normal Mark Face Logic
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
-                obj = face_data['object']
                 obj = face_data['object']
                 face_idx = face_data['face_index']
                 
@@ -553,14 +780,17 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                     rebuild_marked_faces_visual_data(obj, self.marked_faces[obj], use_depsgraph=self.use_depsgraph)
                 
                 # Update Preview
-                update_marked_faces_convex_hull(self.marked_faces, self.push_value, 
-                                       marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+                update_marked_faces_convex_hull(
+                    self.marked_faces, self.push_value,
+                    marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                    face_thickness=self._get_preview_thickness()
+                )
                 
                 context.area.tag_redraw()
             return {'RUNNING_MODAL'}
             
-        # Toggle Coplanar Selection (C)
-        elif event.type == 'C' and event.value == 'PRESS':
+        # Toggle Coplanar Selection (C) - not in thickness mode (C handled above in thickness mode)
+        elif event.type == 'C' and event.value == 'PRESS' and not self.thickness_mode:
             context.scene.cursor_bbox_select_coplanar = not context.scene.cursor_bbox_select_coplanar
             state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
             self.report({'INFO'}, f"Coplanar Selection: {state}")
@@ -572,19 +802,34 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             self.point_mode = not self.point_mode
             if self.point_mode:
                 self.report({'INFO'}, "Entered Add Point Mode")
-                self.current_face_data = None 
-                clear_preview_faces() 
+                self.current_face_data = None
+                clear_preview_faces()
             else:
                 self.report({'INFO'}, "Exited Add Point Mode")
                 clear_preview_point()
+                clear_snap_targets_preview()
                 self.limit_plane_mode = False
                 clear_limitation_plane()
-            
             context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
         # Mouse Move - Update Preview (Hover)
         elif event.type == 'MOUSEMOVE':
+            # Thickness mode: when From Cursor ON, preview follows cursor; else use manual value
+            if self.thickness_mode and not self.point_mode:
+                cursor_loc = context.scene.cursor.location.copy()
+                self._thickness_cursor_value = compute_thickness_selection_to_cursor(
+                    self.marked_faces, cursor_loc, use_depsgraph=self.use_depsgraph
+                )
+                if self.thickness_from_cursor:
+                    self.face_thickness = self._thickness_cursor_value
+                update_marked_faces_convex_hull(
+                    self.marked_faces, self.push_value,
+                    marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                    face_thickness=self._get_preview_thickness()
+                )
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
             if self.point_mode:
                 face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
                 current_loc = None
@@ -592,7 +837,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                 if self.snap_enabled:
                     # Snap Logic - use intersection points if limit plane mode is enabled
                     intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
-                    snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph)
+                    snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode)
                     if snap_result['success']:
                         current_loc = context.scene.cursor.location.copy()
                     else:
@@ -634,14 +879,18 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                     update_preview_point(current_loc)
                 else:
                     clear_preview_point()
+                if self.snap_enabled and (face_data or (self.limit_plane_mode and self.cached_limit_intersections)):
+                    intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
+                    update_snap_targets_preview(face_data, self.snap_mode, intersection_points=intersection_pts)
+                else:
+                    clear_snap_targets_preview()
                 
                 context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
 
-            # Normal Hover Logic
+            # Normal Hover Logic (preview uses current thickness for hull preview)
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
             if face_data and face_data['object'] in self.original_selected_objects:
-                obj = face_data['object']
                 obj = face_data['object']
                 face_idx = face_data['face_index']
                 
@@ -675,8 +924,10 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
+            clear_snap_targets_preview()
             clear_limitation_plane()
             self.cleanup_all_instances(context)  # Clean up collection instances
+            restore_selection_state(context, self._restore_selected, self._restore_active)
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'CANCELLED'}
@@ -689,8 +940,10 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
+            clear_snap_targets_preview()
             clear_limitation_plane()
             self.cleanup_all_instances(context)  # Clean up collection instances
+            restore_selection_state(context, self._restore_selected, self._restore_active)
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'FINISHED'}
@@ -704,7 +957,11 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         self.marked_faces = {}
         self.marked_points = []
         self.point_mode = False
+        self.thickness_mode = False
+        self.thickness_from_cursor = False
+        self._thickness_cursor_value = 0.0
         self.snap_enabled = True
+        self.snap_mode = 1
         self.limit_plane_mode = False
         self.limitation_plane_matrix = None
         self.instance_data = {}
@@ -743,6 +1000,9 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         if context.area.type == 'VIEW_3D':
             # self.marked_faces and properties already initialized above
             
+            # Store for restoration on finish/cancel (do not lose selection)
+            self._restore_selected = list(context.selected_objects)
+            self._restore_active = context.view_layer.objects.active
             # Store original selected objects to restrict interaction
             self.original_selected_objects = set(context.selected_objects)
             if context.active_object:

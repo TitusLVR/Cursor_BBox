@@ -204,6 +204,70 @@ def draw_marked_points(gpu_manager, marked_points, base_color):
         print(f"Error drawing point dots: {e}")
 
 
+def draw_snap_targets_preview(gpu_manager, snap_targets_preview):
+    """Draw snap targets (vertices, edges, face center) for point mode. snap_mode: 0=all, 1=vertex, 2=edge, 3=face."""
+    if not snap_targets_preview:
+        return
+    snap_mode = snap_targets_preview.get('snap_mode', 0)
+    show_vertex = snap_mode in (0, 1)
+    show_edge = snap_mode in (0, 2)
+    show_face = snap_mode in (0, 3)
+
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_test_set('ALWAYS')
+    gpu.state.face_culling_set('NONE')
+    shader = gpu_manager.get_shader('UNIFORM_COLOR')
+
+    # Vertex targets: cyan points
+    if show_vertex and snap_targets_preview.get('vertices'):
+        verts = snap_targets_preview['vertices']
+        batch = gpu_manager.get_cached_batch('snap_preview_vertices', 'POINTS', verts)
+        if batch:
+            gpu.state.point_size_set(10.0)
+            shader.uniform_float("color", (0.0, 0.9, 1.0, 0.95))
+            batch.draw(shader)
+            gpu.state.point_size_set(1.0)
+
+    # Edge targets: yellow lines
+    if show_edge and snap_targets_preview.get('edges'):
+        edge_list = snap_targets_preview['edges']
+        line_verts = []
+        for start, end in edge_list:
+            line_verts.append(start)
+            line_verts.append(end)
+        if line_verts:
+            batch = gpu_manager.get_cached_batch('snap_preview_edges', 'LINES', line_verts)
+            if batch:
+                gpu.state.line_width_set(2.5)
+                shader.uniform_float("color", (1.0, 0.95, 0.0, 0.9))
+                batch.draw(shader)
+                gpu.state.line_width_set(1.0)
+
+    # Face center: magenta point
+    if show_face and snap_targets_preview.get('face_center'):
+        fc = snap_targets_preview['face_center']
+        batch = gpu_manager.get_cached_batch('snap_preview_face_center', 'POINTS', [fc])
+        if batch:
+            gpu.state.point_size_set(12.0)
+            shader.uniform_float("color", (1.0, 0.0, 0.9, 0.95))
+            batch.draw(shader)
+            gpu.state.point_size_set(1.0)
+
+    # Limitation plane intersection points: orange (always shown when present)
+    if snap_targets_preview.get('intersection_points'):
+        ipts = snap_targets_preview['intersection_points']
+        batch = gpu_manager.get_cached_batch('snap_preview_intersections', 'POINTS', ipts)
+        if batch:
+            gpu.state.point_size_set(8.0)
+            shader.uniform_float("color", (1.0, 0.5, 0.0, 0.95))
+            batch.draw(shader)
+            gpu.state.point_size_set(1.0)
+
+    gpu.state.blend_set('NONE')
+    gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.line_width_set(1.0)
+
+
 def draw_preview_faces(gpu_manager, preview_faces_visual_cache, show_backfaces=False):
     """Draw preview faces (hover highlight)"""
     if not preview_faces_visual_cache:
@@ -393,6 +457,9 @@ def create_face_marking_handler(state):
         
         # Draw marked faces on top
         draw_marked_faces(state.gpu_manager, state.marked_faces_visual_cache, state.marked_points, show_backfaces=getattr(state, 'show_backfaces', False), preview_point=getattr(state, 'preview_point', None))
+        # Draw snap targets preview when in point mode with snap
+        if getattr(state, 'snap_targets_preview', None):
+            draw_snap_targets_preview(state.gpu_manager, state.snap_targets_preview)
     return draw_marked_faces_wrapper
 
 def create_bbox_preview_handler(state):

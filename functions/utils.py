@@ -330,6 +330,29 @@ def place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face=T
 
 # ===== OPTIMIZED SNAP FUNCTIONS =====
 
+def _closest_point_on_edge_screen(region, region_3d, edge_start, edge_end, mouse_x, mouse_y):
+    """
+    Get the 3D point on the edge segment that projects to the closest 2D point to the mouse.
+    Returns (world_point, screen_distance_sq) or (None, float('inf')) if projection fails.
+    """
+    start_2d = view3d_utils.location_3d_to_region_2d(region, region_3d, edge_start)
+    end_2d = view3d_utils.location_3d_to_region_2d(region, region_3d, edge_end)
+    if start_2d is None or end_2d is None:
+        return None, float('inf')
+    dx = end_2d[0] - start_2d[0]
+    dy = end_2d[1] - start_2d[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-10:
+        t = 0.5
+        pt_2d = start_2d
+    else:
+        t = ((mouse_x - start_2d[0]) * dx + (mouse_y - start_2d[1]) * dy) / length_sq
+        t = max(0.0, min(1.0, t))
+        pt_2d = (start_2d[0] + t * dx, start_2d[1] + t * dy)
+    dist_sq = (pt_2d[0] - mouse_x) ** 2 + (pt_2d[1] - mouse_y) ** 2
+    world_pt = edge_start + t * (edge_end - edge_start)
+    return world_pt, dist_sq
+
 @lru_cache(maxsize=16)
 def get_snap_elements_cached(obj_name, face_index, use_depsgraph=False):
     """Cache snap elements for a specific face"""
@@ -379,8 +402,20 @@ def get_snap_elements_cached(obj_name, face_index, use_depsgraph=False):
     
     return elements
 
-def snap_cursor_to_closest_element_optimized(context, event, face_data=None, threshold=120, intersection_points=None, use_depsgraph=False):
-    """Optimized cursor snapping with caching"""
+def _snap_mode_allows(snap_mode, element_type):
+    """snap_mode: 0=all, 1=vertex, 2=edge, 3=face. Return True if element_type is allowed."""
+    if snap_mode == 0:
+        return True
+    if snap_mode == 1:
+        return element_type == 'vertex'
+    if snap_mode == 2:
+        return element_type == 'edge'
+    if snap_mode == 3:
+        return element_type == 'face'
+    return True
+
+def snap_cursor_to_closest_element_optimized(context, event, face_data=None, threshold=120, intersection_points=None, use_depsgraph=False, snap_mode=0):
+    """Optimized cursor snapping with caching. snap_mode: 0=all, 1=vertex, 2=edge, 3=face."""
     region = context.region
     region_3d = context.region_data
     
@@ -391,7 +426,7 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None, thr
     closest_distance = float('inf')
     closest_type = None
     
-    # Check intersection points first if provided
+    # Check intersection points if provided (always available as snap targets when limitation plane is on)
     if intersection_points:
         for p in intersection_points:
             screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, p)
@@ -401,12 +436,17 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None, thr
                     closest_distance = screen_distance
                     closest_point = p
                     closest_type = 'intersection'
-    
+
     if face_data:
-        # Use cached snap elements for the specific face
+        # Use cached snap elements for vertices and face; for edges use closest point along edge
         elements = get_snap_elements_cached(face_data['object'].name, face_data['face_index'], use_depsgraph=use_depsgraph)
         
         for element_type, world_pos in elements:
+            if element_type == 'edge':
+                # Edges handled below via closest point on segment
+                continue
+            if not _snap_mode_allows(snap_mode, element_type):
+                continue
             screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
             if screen_pos:
                 screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
@@ -414,6 +454,21 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None, thr
                     closest_distance = screen_distance
                     closest_point = world_pos
                     closest_type = element_type
+
+        # Snap to closest point on each edge (so cursor moves along the edge)
+        if face_data.get('edges') and _snap_mode_allows(snap_mode, 'edge'):
+            for edge in face_data['edges']:
+                world_pt, dist_sq = _closest_point_on_edge_screen(
+                    region, region_3d,
+                    edge['start'], edge['end'],
+                    mouse_x, mouse_y
+                )
+                if world_pt is not None:
+                    screen_distance = dist_sq ** 0.5
+                    if screen_distance < closest_distance:
+                        closest_distance = screen_distance
+                        closest_point = world_pt
+                        closest_type = 'edge'
     else:
         # Fall back to all selected objects (original behavior)
         context_hash = get_context_hash()
@@ -438,49 +493,52 @@ def snap_cursor_to_closest_element_optimized(context, event, face_data=None, thr
             matrix_world = obj.matrix_world
             
             # Check vertices (sample only if many vertices)
-            vertex_step = max(1, len(mesh.vertices) // 100)  # Sample every nth vertex for performance
-            for i in range(0, len(mesh.vertices), vertex_step):
-                vert = mesh.vertices[i]
-                world_pos = matrix_world @ vert.co
-                screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
-                if screen_pos:
-                    screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
-                    if screen_distance < closest_distance:
-                        closest_distance = screen_distance
-                        closest_point = world_pos
-                        closest_type = 'vertex'
+            if _snap_mode_allows(snap_mode, 'vertex'):
+                vertex_step = max(1, len(mesh.vertices) // 100)  # Sample every nth vertex for performance
+                for i in range(0, len(mesh.vertices), vertex_step):
+                    vert = mesh.vertices[i]
+                    world_pos = matrix_world @ vert.co
+                    screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
+                    if screen_pos:
+                        screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
+                        if screen_distance < closest_distance:
+                            closest_distance = screen_distance
+                            closest_point = world_pos
+                            closest_type = 'vertex'
             
             # Check edge midpoints (sample for performance)
-            edge_step = max(1, len(mesh.edges) // 50)
-            for i in range(0, len(mesh.edges), edge_step):
-                edge = mesh.edges[i]
-                vert1 = mesh.vertices[edge.vertices[0]]
-                vert2 = mesh.vertices[edge.vertices[1]]
-                midpoint_local = (vert1.co + vert2.co) / 2
-                world_pos = matrix_world @ midpoint_local
-                
-                screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
-                if screen_pos:
-                    screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
-                    if screen_distance < closest_distance:
-                        closest_distance = screen_distance
-                        closest_point = world_pos
-                        closest_type = 'edge'
+            if _snap_mode_allows(snap_mode, 'edge'):
+                edge_step = max(1, len(mesh.edges) // 50)
+                for i in range(0, len(mesh.edges), edge_step):
+                    edge = mesh.edges[i]
+                    vert1 = mesh.vertices[edge.vertices[0]]
+                    vert2 = mesh.vertices[edge.vertices[1]]
+                    midpoint_local = (vert1.co + vert2.co) / 2
+                    world_pos = matrix_world @ midpoint_local
+                    
+                    screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
+                    if screen_pos:
+                        screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
+                        if screen_distance < closest_distance:
+                            closest_distance = screen_distance
+                            closest_point = world_pos
+                            closest_type = 'edge'
             
             # Check face centers (sample for performance)
-            face_step = max(1, len(mesh.polygons) // 25)
-            for i in range(0, len(mesh.polygons), face_step):
-                face = mesh.polygons[i]
-                face_center_local = face.center
-                world_pos = matrix_world @ face_center_local
-                
-                screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
-                if screen_pos:
-                    screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
-                    if screen_distance < closest_distance:
-                        closest_distance = screen_distance
-                        closest_point = world_pos
-                        closest_type = 'face'
+            if _snap_mode_allows(snap_mode, 'face'):
+                face_step = max(1, len(mesh.polygons) // 25)
+                for i in range(0, len(mesh.polygons), face_step):
+                    face = mesh.polygons[i]
+                    face_center_local = face.center
+                    world_pos = matrix_world @ face_center_local
+                    
+                    screen_pos = view3d_utils.location_3d_to_region_2d(region, region_3d, world_pos)
+                    if screen_pos:
+                        screen_distance = ((screen_pos[0] - mouse_x) ** 2 + (screen_pos[1] - mouse_y) ** 2) ** 0.5
+                        if screen_distance < closest_distance:
+                            closest_distance = screen_distance
+                            closest_point = world_pos
+                            closest_type = 'face'
     
     # Snap threshold check
     if closest_point and closest_distance < threshold:
@@ -541,9 +599,9 @@ def place_cursor_with_raycast_and_edge(context, event, align_to_face=True, edge_
     """Legacy function name - redirects to optimized version"""
     return place_cursor_with_raycast_and_edge_optimized(context, event, align_to_face, edge_index, preview, use_depsgraph=use_depsgraph)
 
-def snap_cursor_to_closest_element(context, event, face_data=None, threshold=120, intersection_points=None, use_depsgraph=False):
+def snap_cursor_to_closest_element(context, event, face_data=None, threshold=120, intersection_points=None, use_depsgraph=False, snap_mode=0):
     """Legacy function name - redirects to optimized version"""
-    return snap_cursor_to_closest_element_optimized(context, event, face_data, threshold=threshold, intersection_points=intersection_points, use_depsgraph=use_depsgraph)
+    return snap_cursor_to_closest_element_optimized(context, event, face_data, threshold=threshold, intersection_points=intersection_points, use_depsgraph=use_depsgraph, snap_mode=snap_mode)
 
 # ===== BATCH PROCESSING UTILITIES =====
 
@@ -1322,7 +1380,108 @@ def calculate_plane_edge_intersections(obj, plane_origin, plane_normal, use_deps
                 
     return intersections
 
+
+def best_fit_plane_from_points(points):
+    """
+    Compute a best-fit plane from a list of 3D points (centroid + normal via PCA).
+    Returns (origin, normal) as world-space Vector, or (None, None) if insufficient points.
+    """
+    if not points or len(points) < 3:
+        return None, None
+    n = len(points)
+    centroid = Vector((0.0, 0.0, 0.0))
+    for p in points:
+        centroid += p
+    centroid /= n
+    # Build 3x3 covariance matrix (we only need it for smallest eigenvector)
+    xx = yy = zz = xy = xz = yz = 0.0
+    for p in points:
+        dx = p.x - centroid.x
+        dy = p.y - centroid.y
+        dz = p.z - centroid.z
+        xx += dx * dx
+        yy += dy * dy
+        zz += dz * dz
+        xy += dx * dy
+        xz += dx * dz
+        yz += dy * dz
+    # Smallest eigenvector of covariance matrix = plane normal (power iteration on (trace*I - M))
+    trace = xx + yy + zz
+    if trace < 1e-12:
+        return None, None
+    v = Vector((1.0, 0.0, 0.0))
+    for _ in range(20):
+        v_new = Vector((
+            trace * v.x - (xx * v.x + xy * v.y + xz * v.z),
+            trace * v.y - (xy * v.x + yy * v.y + yz * v.z),
+            trace * v.z - (xz * v.x + yz * v.y + zz * v.z)
+        ))
+        length = v_new.length
+        if length < 1e-9:
+            return centroid, Vector((0, 0, 1))
+        v = v_new / length
+    return centroid, v.normalized()
+
+
+def matrix_from_plane(origin, normal):
+    """Build a 4x4 matrix with Z = normal, origin as translation."""
+    z_axis = normal.normalized()
+    if abs(z_axis.z) < 0.9:
+        x_axis = Vector((0, 0, 1)).cross(z_axis).normalized()
+    else:
+        x_axis = Vector((1, 0, 0)).cross(z_axis).normalized()
+    y_axis = z_axis.cross(x_axis).normalized()
+    m = Matrix(((x_axis.x, y_axis.x, z_axis.x, origin.x),
+                (x_axis.y, y_axis.y, z_axis.y, origin.y),
+                (x_axis.z, y_axis.z, z_axis.z, origin.z),
+                (0, 0, 0, 1)))
+    return m
+
+
+def calculate_plane_edge_intersections_multi(objects, plane_origin, plane_normal, use_depsgraph=False):
+    """Intersections of a plane with edges of multiple mesh objects. Returns combined list of world-space points."""
+    result = []
+    for obj in objects:
+        if obj and obj.type == 'MESH':
+            result.extend(calculate_plane_edge_intersections(obj, plane_origin, plane_normal, use_depsgraph=use_depsgraph))
+    return result
+
+
 # ===== OPERATOR UTILITY FUNCTIONS =====
+
+# Principal plane names for cursor alignment (cycle with R in point mode)
+CURSOR_PLANE_ALIGNMENTS = ('XY', 'YZ', 'XZ')
+
+def get_principal_plane_rotation_matrix(plane):
+    """
+    Return a 3x3 rotation matrix that aligns the cursor to a principal plane.
+    plane: 'XY' (Z up), 'YZ' (X up), 'XZ' (Y up).
+    Cursor Z axis becomes the plane normal (world axis).
+    """
+    if plane == 'XY':
+        # Z = world Z
+        return Matrix(((1, 0, 0), (0, 1, 0), (0, 0, 1)))
+    if plane == 'YZ':
+        # Z = world X (cursor lies in YZ plane)
+        return Matrix(((0, 0, -1), (0, 1, 0), (1, 0, 0)))
+    if plane == 'XZ':
+        # Z = world Y (cursor lies in XZ plane)
+        return Matrix(((1, 0, 0), (0, 0, -1), (0, 1, 0)))
+    return Matrix.Identity(3)
+
+def set_cursor_rotation_to_principal_plane(context, plane):
+    """Set cursor rotation to align to principal plane (XY, YZ, or XZ). Keeps cursor location."""
+    cursor = context.scene.cursor
+    rot_3x3 = get_principal_plane_rotation_matrix(plane)
+    if cursor.rotation_mode == 'QUATERNION':
+        cursor.rotation_quaternion = rot_3x3.to_quaternion()
+    elif cursor.rotation_mode == 'AXIS_ANGLE':
+        q = rot_3x3.to_quaternion()
+        axis, angle = q.to_axis_angle()
+        cursor.rotation_axis_angle = [angle, axis.x, axis.y, axis.z]
+    else:
+        cursor.rotation_euler = rot_3x3.to_euler(cursor.rotation_mode)
+    return plane
 
 def get_cursor_rotation_euler(context):
     """
@@ -1376,7 +1535,7 @@ def get_selected_faces_from_edit_mode(context):
 
 def calculate_point_location(context, event, face_data, snap_enabled, limit_plane_mode, 
                             limitation_plane_matrix, cached_limit_intersections, 
-                            snap_threshold, use_depsgraph=False):
+                            snap_threshold, use_depsgraph=False, snap_mode=0):
     """
     Calculate point location for point mode, handling snap and limit plane logic.
     
@@ -1390,6 +1549,7 @@ def calculate_point_location(context, event, face_data, snap_enabled, limit_plan
         cached_limit_intersections: Cached intersection points
         snap_threshold: Snap threshold in pixels
         use_depsgraph: Whether to use depsgraph
+        snap_mode: 0=all, 1=vertex, 2=edge, 3=face
         
     Returns:
         tuple: (location, success_message) or (None, None) if failed
@@ -1409,7 +1569,7 @@ def calculate_point_location(context, event, face_data, snap_enabled, limit_plan
         intersection_pts = cached_limit_intersections if limit_plane_mode else None
         snap_result = snap_cursor_to_closest_element(
             context, event, face_data, threshold=snap_threshold, 
-            intersection_points=intersection_pts, use_depsgraph=use_depsgraph
+            intersection_points=intersection_pts, use_depsgraph=use_depsgraph, snap_mode=snap_mode
         )
         if snap_result['success']:
             loc = context.scene.cursor.location.copy()
@@ -1500,14 +1660,66 @@ def get_evaluated_mesh(obj, use_depsgraph=False, context=None):
     obj_matrix_world = obj.matrix_world
     return mesh, obj_matrix_world
 
-def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, context=None):
+
+def compute_thickness_selection_to_cursor(marked_faces_dict, cursor_location, use_depsgraph=False, context=None):
+    """
+    Signed distance from cursor to the selection (marked faces) along the average face normal.
+    Used in thickness mode: thickness so that extruded faces reach the cursor.
+    
+    Args:
+        marked_faces_dict: {obj: set(face_indices)}
+        cursor_location: World-space cursor position (Vector).
+        use_depsgraph: Whether to use depsgraph evaluation
+        context: Blender context (optional)
+    
+    Returns:
+        float: Signed distance (cursor - selection plane along normal). Positive = cursor in front of selection.
+    """
+    if context is None:
+        context = bpy.context
+    if not marked_faces_dict:
+        return 0.0
+    
+    sum_center = Vector((0, 0, 0))
+    sum_normal = Vector((0, 0, 0))
+    n = 0
+    for obj, face_indices in marked_faces_dict.items():
+        if not face_indices or obj.type != 'MESH':
+            continue
+        mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+        mat_3x3 = obj_matrix_world.to_3x3()
+        for face_idx in face_indices:
+            if face_idx >= len(mesh.polygons):
+                continue
+            face = mesh.polygons[face_idx]
+            world_center = obj_matrix_world @ face.center
+            world_normal = (mat_3x3 @ face.normal).normalized()
+            sum_center += world_center
+            sum_normal += world_normal
+            n += 1
+    if n == 0:
+        return 0.0
+    avg_center = sum_center / n
+    avg_normal = sum_normal / n
+    if avg_normal.length_squared < 1e-10:
+        return 0.0
+    avg_normal.normalize()
+    return (Vector(cursor_location) - avg_center).dot(avg_normal)
+
+
+def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, context=None, face_thickness=0.0):
     """
     Collect all world-space vertices from marked faces dictionary.
+    
+    When face_thickness is non-zero, also adds vertices offset along each face's
+    normal (extrusion-like), so the convex hull can wrap both original and
+    thickened faces. This is separate from push offset (which scales the final hull).
     
     Args:
         marked_faces_dict: Dictionary mapping objects to sets of face indices
         use_depsgraph: Whether to use depsgraph evaluation
         context: Blender context (optional, uses bpy.context if not provided)
+        face_thickness: Offset along face normals; can be positive (outward) or negative (inward). 0 = no extra points.
         
     Returns:
         list: List of Vector objects representing world-space vertex positions
@@ -1520,11 +1732,14 @@ def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, c
     if not marked_faces_dict:
         return all_vertices
     
+    use_thickness = abs(face_thickness) > 1e-6
+    
     for obj, face_indices in marked_faces_dict.items():
         if not face_indices or obj.type != 'MESH':
             continue
         
         mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+        mat_3x3 = obj_matrix_world.to_3x3()
         
         # Collect vertices from all marked faces
         for face_idx in face_indices:
@@ -1532,7 +1747,14 @@ def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, c
                 continue
             
             face = mesh.polygons[face_idx]
-            all_vertices.extend([obj_matrix_world @ mesh.vertices[vert_idx].co for vert_idx in face.vertices])
+            world_verts = [obj_matrix_world @ mesh.vertices[vert_idx].co for vert_idx in face.vertices]
+            all_vertices.extend(world_verts)
+            
+            if use_thickness:
+                # Face normal in world space (no translation)
+                face_normal = (mat_3x3 @ face.normal).normalized()
+                for v in world_verts:
+                    all_vertices.append(v + face_normal * face_thickness)
     
     return all_vertices
 

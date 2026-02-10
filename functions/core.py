@@ -44,6 +44,8 @@ class CursorBBoxState:
         self.preview_culling = False # Default OFF (Double Sided)
         self.preview_point = None
         self.limitation_plane_matrix = None
+        # Snap targets preview when in point mode with snap: vertices, edges, face_center, snap_mode
+        self.snap_targets_preview = None
         
     def cleanup(self):
         """Clean up all state and handlers"""
@@ -332,6 +334,37 @@ def clear_preview_point():
     global _state
     _state.preview_point = None
 
+def update_snap_targets_preview(face_data, snap_mode, intersection_points=None):
+    """Update snap targets preview from current face and optional limitation-plane intersection points."""
+    global _state
+    vertices = []
+    edges = []
+    face_center = None
+    if face_data and face_data.get('edges'):
+        vertices = [edge['start'].copy() for edge in face_data['edges']]
+        edges = [(edge['start'].copy(), edge['end'].copy()) for edge in face_data['edges']]
+        fc = face_data.get('face_center') or face_data.get('hit_location')
+        if fc:
+            face_center = fc.copy()
+    intersection_pts = None
+    if intersection_points:
+        intersection_pts = [p.copy() for p in intersection_points]
+    if not vertices and not edges and not face_center and not intersection_pts:
+        _state.snap_targets_preview = None
+        return
+    _state.snap_targets_preview = {
+        'vertices': vertices,
+        'edges': edges,
+        'face_center': face_center,
+        'snap_mode': snap_mode,
+        'intersection_points': intersection_pts,
+    }
+
+def clear_snap_targets_preview():
+    """Clear snap targets preview"""
+    global _state
+    _state.snap_targets_preview = None
+
 def update_limitation_plane(matrix):
     """Update limitation plane matrix"""
     global _state
@@ -480,14 +513,16 @@ def update_marked_faces_bbox(marked_faces_dict, push_value, cursor_location, cur
         _state.current_bbox_data = None
 
 
-def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points=None, use_depsgraph=False):
-    """Update preview with convex hull of marked faces/points"""
+def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points=None, use_depsgraph=False, face_thickness=0.0):
+    """Update preview with convex hull of marked faces/points. face_thickness offsets face vertices along normals (extrusion-like)."""
     global _state
     from .utils import collect_vertices_from_marked_faces
     
     try:
-        # Collect vertices from marked faces using shared utility
-        all_vertices = collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=use_depsgraph)
+        # Collect vertices from marked faces using shared utility (with optional thickness offset)
+        all_vertices = collect_vertices_from_marked_faces(
+            marked_faces_dict, use_depsgraph=use_depsgraph, face_thickness=face_thickness
+        )
 
         # Add marked points
         if marked_points:

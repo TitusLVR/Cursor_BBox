@@ -3,6 +3,9 @@ import bmesh
 from mathutils import Vector, Matrix
 from math import radians, degrees
 from ..functions.utils import (
+    restore_selection_state,
+    set_cursor_rotation_to_principal_plane,
+    CURSOR_PLANE_ALIGNMENTS,
     get_face_edges_from_raycast,
     select_edge_by_scroll,
     place_cursor_with_raycast_and_edge,
@@ -10,6 +13,7 @@ from ..functions.utils import (
     get_connected_coplanar_faces,
     project_point_to_plane_intersection,
     calculate_plane_edge_intersections,
+    calculate_plane_edge_intersections_multi,
     ensure_cbb_collection,
     ensure_cbb_material,
     assign_object_styles,
@@ -46,6 +50,8 @@ from ..functions.core import (
     get_preview_culling,
     update_preview_point,
     clear_preview_point,
+    update_snap_targets_preview,
+    clear_snap_targets_preview,
     update_limitation_plane,
     clear_limitation_plane,
     enable_limitation_plane_wrapper as enable_limitation_plane,
@@ -174,6 +180,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         max=500,
         description="Distance in pixels to snap to elements"
     )
+    # Snap mode: 0=all, 1=vertex, 2=edge, 3=face (keys 1, 2, 3 in point mode)
+    snap_mode: bpy.props.IntProperty(name="Snap Mode", default=1, min=0, max=3)  # 1=vertex default
+    # Cursor plane alignment in point mode: 0=XY, 1=YZ, 2=XZ (R cycles)
+    cursor_plane_align: bpy.props.IntProperty(name="Cursor Plane", default=0, min=0, max=2)
     
     current_edge_index: bpy.props.IntProperty(default=0)
     current_face_data = None
@@ -233,14 +243,103 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         if self.point_mode:
             snap_state = "✓" if self.snap_enabled else "✗"
             limit_state = "✓" if self.limit_plane_mode else "✗"
+            mode_names = ("All", "Vert", "Edge", "Face")
+            snap_mode_str = mode_names[self.snap_mode]
+            plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
             context.area.header_text_set(
-                f"POINT MODE | LMB: Add | S: Snap {snap_state} | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
+                f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {snap_mode_str} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
             )
         else:
             context.area.header_text_set(
                 f"{status_text} | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
                 f"D: Deps {deps_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
             )
+        
+        # Snap mode 1=Vertex, 2=Edge, 3=Face (point mode only)
+        if self.point_mode and event.value == 'PRESS':
+            if event.type in ('ONE', 'NUMPAD_1'):
+                self.snap_mode = 1
+                self.report({'INFO'}, "Snap: Vertex only")
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            if event.type in ('TWO', 'NUMPAD_2'):
+                self.snap_mode = 2
+                self.report({'INFO'}, "Snap: Edge only")
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+            if event.type in ('THREE', 'NUMPAD_3'):
+                self.snap_mode = 3
+                self.report({'INFO'}, "Snap: Face only")
+                context.area.tag_redraw()
+                return {'RUNNING_MODAL'}
+        
+        # Reset cursor rotation to principal plane (R) - point mode only
+        if self.point_mode and event.type == 'R' and event.value == 'PRESS':
+            self.cursor_plane_align = (self.cursor_plane_align + 1) % 3
+            plane = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
+            set_cursor_rotation_to_principal_plane(context, plane)
+            if self.limit_plane_mode:
+                self.limitation_plane_matrix = context.scene.cursor.matrix.copy()
+                update_limitation_plane(self.limitation_plane_matrix)
+                origin = self.limitation_plane_matrix.to_translation()
+                normal = Vector(self.limitation_plane_matrix.col[2][:3])
+                self.cached_limit_intersections = []
+                if self.marked_faces:
+                    objects = list(self.marked_faces.keys())
+                    self.cached_limit_intersections = calculate_plane_edge_intersections_multi(
+                        objects, origin, normal, use_depsgraph=self.use_depsgraph
+                    )
+                elif context.active_object and context.active_object.type == 'MESH':
+                    self.cached_limit_intersections = calculate_plane_edge_intersections(
+                        context.active_object, origin, normal, use_depsgraph=self.use_depsgraph
+                    )
+            self.report({'INFO'}, f"Cursor: {plane}")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        # E: Set cursor location only (to current hover/snap position) and update limitation plane
+        if self.point_mode and event.type == 'E' and event.value == 'PRESS':
+            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+            if face_data:
+                cursor = context.scene.cursor
+                if self.snap_enabled:
+                    intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
+                    snap_result = snap_cursor_to_closest_element(
+                        context, event, face_data, threshold=self.snap_threshold,
+                        intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode
+                    )
+                    if not snap_result['success']:
+                        cursor.location = face_data['hit_location'].copy()
+                elif self.limit_plane_mode and self.limitation_plane_matrix:
+                    plane_origin = self.limitation_plane_matrix.to_translation()
+                    plane_normal = self.limitation_plane_matrix.col[2].to_3d()
+                    proj_pt = project_point_to_plane_intersection(
+                        face_data['hit_location'], face_data['face_normal'], plane_origin, plane_normal
+                    )
+                    if proj_pt:
+                        cursor.location = proj_pt
+                    else:
+                        cursor.location = face_data['hit_location'].copy()
+                else:
+                    cursor.location = face_data['hit_location'].copy()
+                if self.limit_plane_mode:
+                    self.limitation_plane_matrix = cursor.matrix.copy()
+                    update_limitation_plane(self.limitation_plane_matrix)
+                    origin = self.limitation_plane_matrix.to_translation()
+                    normal = Vector(self.limitation_plane_matrix.col[2][:3])
+                    self.cached_limit_intersections = []
+                    if self.marked_faces:
+                        objects = list(self.marked_faces.keys())
+                        self.cached_limit_intersections = calculate_plane_edge_intersections_multi(
+                            objects, origin, normal, use_depsgraph=self.use_depsgraph
+                        )
+                    elif context.active_object and context.active_object.type == 'MESH':
+                        self.cached_limit_intersections = calculate_plane_edge_intersections(
+                            context.active_object, origin, normal, use_depsgraph=self.use_depsgraph
+                        )
+                self.report({'INFO'}, "Cursor location updated")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
         
         # Toggle Depsgraph (D)
         if event.type == 'D' and event.value == 'PRESS':
@@ -325,8 +424,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             if self.point_mode:
                 snap_state = "✓" if self.snap_enabled else "✗"
                 limit_state = "✓" if self.limit_plane_mode else "✗"
+                mode_names = ("All", "Vert", "Edge", "Face")
+                plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
                 context.area.header_text_set(
-                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
+                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {mode_names[self.snap_mode]} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
                 )
             else:
                 marking_status = f" ({len(self.marked_faces)} marked)" if self.marked_faces else ""
@@ -369,7 +470,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                     context, event, face_data, self.snap_enabled, 
                     self.limit_plane_mode, self.limitation_plane_matrix,
                     self.cached_limit_intersections, self.snap_threshold,
-                    use_depsgraph=self.use_depsgraph
+                    use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode
                 )
                 
                 if loc is None:
@@ -438,20 +539,24 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         elif event.type == 'C' and event.value == 'PRESS':
             self.limit_plane_mode = not self.limit_plane_mode
             if self.limit_plane_mode:
+                # Always align limitation plane to cursor when pressing C
+                self.limitation_plane_matrix = context.scene.cursor.matrix.copy()
+                update_limitation_plane(self.limitation_plane_matrix)
                 enable_limitation_plane(context, self.limitation_plane_matrix)
-                
                 # Calculate and cache edge intersections for snapping
                 self.cached_limit_intersections = []
-                if context.active_object and context.active_object.type == 'MESH':
-                    origin = self.limitation_plane_matrix.to_translation()
-                    normal = self.limitation_plane_matrix.col[2][:3] 
-                    self.cached_limit_intersections = calculate_plane_edge_intersections(
-                        context.active_object, 
-                        Vector(origin), 
-                        Vector(normal),
-                        use_depsgraph=self.use_depsgraph
+                origin = self.limitation_plane_matrix.to_translation()
+                normal = Vector(self.limitation_plane_matrix.col[2][:3])
+                if self.marked_faces:
+                    objects = list(self.marked_faces.keys())
+                    self.cached_limit_intersections = calculate_plane_edge_intersections_multi(
+                        objects, origin, normal, use_depsgraph=self.use_depsgraph
                     )
-                    self.report({'INFO'}, f"Limitation Plane ON | {len(self.cached_limit_intersections)} pts")
+                elif context.active_object and context.active_object.type == 'MESH':
+                    self.cached_limit_intersections = calculate_plane_edge_intersections(
+                        context.active_object, origin, normal, use_depsgraph=self.use_depsgraph
+                    )
+                self.report({'INFO'}, f"Limitation Plane ON | {len(self.cached_limit_intersections)} pts")
             else:
                 clear_limitation_plane()
                 disable_limitation_plane(context)
@@ -471,6 +576,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             else:
                 self.report({'INFO'}, "Exited Add Point Mode")
                 clear_preview_point()
+                clear_snap_targets_preview()
                 self.limit_plane_mode = False
                 clear_limitation_plane()
             
@@ -491,7 +597,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                 # So let's run the logic once to be sure
                 
                 if self.snap_enabled:
-                     snap_result = snap_cursor_to_closest_element(context, event, face_data, use_depsgraph=self.use_depsgraph)
+                     snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode)
                      if snap_result['success']:
                          loc = context.scene.cursor.location.copy()
                          self.report({'INFO'}, f"Added point snapped to {snap_result['type']}")
@@ -566,7 +672,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                  # Standard Snap Logic (Only if not limited or if limit allows combining?)
                  # For now, Limit Plane overrides standard snap if active.
                  elif self.snap_enabled:
-                     snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph)
+                     snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode)
                      if snap_result['success']:
                          loc = context.scene.cursor.location.copy()
                  elif face_data:
@@ -637,12 +743,14 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         elif event.type == 'S' and event.value == 'PRESS':
             if self.point_mode:
                 self.snap_enabled = not self.snap_enabled
+                if not self.snap_enabled:
+                    clear_snap_targets_preview()
                 state_str = "ON" if self.snap_enabled else "OFF"
                 self.report({'INFO'}, f"Point Snap: {state_str}")
             else:
                  # Snap cursor to closest vertex, edge midpoint, or face center from current face
                 face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
-                result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph)
+                result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode)
                 if result['success'] and (not face_data or face_data['object'] in self.original_selected_objects):
                     if face_data:
                         self.report({'INFO'}, f"Cursor snapped to {result['type']} on {face_data['object'].name} ({result['distance']:.1f}px away)")
@@ -671,7 +779,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                 if self.snap_enabled:
                     # Snap Logic - use intersection points if limit plane mode is enabled
                     intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
-                    snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph)
+                    snap_result = snap_cursor_to_closest_element(context, event, face_data, threshold=self.snap_threshold, intersection_points=intersection_pts, use_depsgraph=self.use_depsgraph, snap_mode=self.snap_mode)
                     if snap_result['success']:
                         current_loc = context.scene.cursor.location.copy() 
                     else:
@@ -711,6 +819,11 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                 
                 if current_loc:
                     update_preview_point(current_loc)
+                if self.snap_enabled and (face_data or (self.limit_plane_mode and self.cached_limit_intersections)):
+                    intersection_pts = self.cached_limit_intersections if self.limit_plane_mode else None
+                    update_snap_targets_preview(face_data, self.snap_mode, intersection_points=intersection_pts)
+                else:
+                    clear_snap_targets_preview()
                     
                 context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
@@ -764,8 +877,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
+            clear_snap_targets_preview()
             clear_limitation_plane()
             self.cleanup_all_instances(context)  # Clean up collection instances
+            restore_selection_state(context, self._restore_selected, self._restore_active)
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'CANCELLED'}
@@ -778,8 +893,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
+            clear_snap_targets_preview()
             clear_limitation_plane()
             self.cleanup_all_instances(context)  # Clean up collection instances
+            restore_selection_state(context, self._restore_selected, self._restore_active)
             context.area.header_text_set(None)
             context.area.tag_redraw()
             return {'FINISHED'}
@@ -833,7 +950,9 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             self.current_face_data = None
             # self.marked_faces already initialized above
             self.align_to_face = context.scene.cursor_bbox_align_face
-            
+            # Store for restoration on finish/cancel (do not lose selection)
+            self._restore_selected = list(context.selected_objects)
+            self._restore_active = context.view_layer.objects.active
             self.original_selected_objects = set(context.selected_objects)
             if context.active_object:
                 self.original_selected_objects.add(context.active_object)
