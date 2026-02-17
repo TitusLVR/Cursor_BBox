@@ -1,6 +1,7 @@
+import os
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, EnumProperty
+from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, EnumProperty, StringProperty
 
 class CursorBBoxPreferences(AddonPreferences):
     """Addon preferences for Cursor Aligned Bounding Box"""
@@ -11,10 +12,26 @@ class CursorBBoxPreferences(AddonPreferences):
         name="Active Tab",
         items=[
             ('SETTINGS', "Settings", "General addon settings"),
+            ('TOOLS', "Tools", "External tool paths"),
             ('KEYMAPS', "Keymaps", "Edit keyboard shortcuts"),
             ('UI', "UI", "Customize colors and appearance"),
         ],
         default='SETTINGS'
+    )
+    
+    # External tool paths
+    vhacd_executable: StringProperty(
+        name="V-HACD Executable",
+        description="Path to V-HACD executable (VHACD.exe / TestVHACD)",
+        subtype='FILE_PATH',
+        default=""
+    )
+    
+    coacd_executable: StringProperty(
+        name="CoACD Executable",
+        description="Path to CoACD executable (CoACD.exe / main)",
+        subtype='FILE_PATH',
+        default=""
     )
     
     # Edge highlight settings - Updated to #46FFB4
@@ -170,6 +187,65 @@ class CursorBBoxPreferences(AddonPreferences):
             
             row = box.row()
             row.prop(self, "use_depsgraph")
+        
+        elif self.active_tab == 'TOOLS':
+            # V-HACD
+            box = layout.box()
+            row = box.row()
+            row.label(text="V-HACD (Convex Decomposition):", icon='MOD_MESHDEFORM')
+            col = box.column(align=True)
+            col.prop(self, "vhacd_executable")
+            vhacd_path = bpy.path.abspath(self.vhacd_executable)
+            if vhacd_path and os.path.isfile(vhacd_path):
+                row = box.row()
+                row.label(text="Found", icon='CHECKMARK')
+            elif self.vhacd_executable:
+                row = box.row()
+                row.label(text="File not found!", icon='ERROR')
+            
+            layout.separator()
+            
+            # CoACD
+            box = layout.box()
+            row = box.row()
+            row.label(text="CoACD (Collision-Aware Decomposition):", icon='MOD_MESHDEFORM')
+            col = box.column(align=True)
+            col.prop(self, "coacd_executable")
+            coacd_path = bpy.path.abspath(self.coacd_executable)
+            if coacd_path and os.path.isfile(coacd_path):
+                row = box.row()
+                row.label(text="Found", icon='CHECKMARK')
+            elif self.coacd_executable:
+                row = box.row()
+                row.label(text="File not found!", icon='ERROR')
+
+            layout.separator()
+
+            # CoACD-U (Python library)
+            box = layout.box()
+            row = box.row()
+            row.label(text="CoACD-U (Ultikynnys Variant, 3-10x Faster):", icon='MOD_MESHDEFORM')
+            col = box.column(align=True)
+            try:
+                import coacd_u
+                has_coacd_u = True
+            except ImportError:
+                has_coacd_u = False
+            if has_coacd_u:
+                row = box.row()
+                row.label(text="coacd_u installed", icon='CHECKMARK')
+            else:
+                row = box.row()
+                row.label(text="coacd_u not installed", icon='ERROR')
+                row = box.row()
+                row.scale_y = 1.3
+                row.operator(
+                    "cursor_bbox.install_coacd_u",
+                    text="Install coacd_u from GitHub",
+                    icon='IMPORT',
+                )
+                row = box.row()
+                row.label(text="Or download manually: github.com/Ultikynnys/CoACD/releases")
             
         elif self.active_tab == 'KEYMAPS':
             # Keymap shortcuts

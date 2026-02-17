@@ -39,3 +39,12 @@ class CursorBBox_MT_pie_menu(bpy.types.Menu):
         # Northeast: Box From Selection
         op = pie.operator("cursor_bbox.create_box", text="From Selection", icon='SELECT_SET')
         op.push_value = scene.cursor_bbox_push
+
+        # Southwest: V-HACD Decomposition
+        pie.operator("cursor_bbox.collision_vhacd", text="V-HACD", icon='MOD_MESHDEFORM')
+
+        # Southeast: CoACD Decomposition
+        pie.operator("cursor_bbox.collision_coacd", text="CoACD", icon='MOD_MESHDEFORM')
+
+        # Extra: CoACD-U Decomposition (overflow column)
+        pie.operator("cursor_bbox.collision_coacd_u", text="CoACD-U (Fast)", icon='MOD_MESHDEFORM')

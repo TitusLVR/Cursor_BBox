@@ -26,6 +26,7 @@ from ..functions.utils import (
     make_collection_instance_real,
     cleanup_collection_instance_temp,
     compute_thickness_selection_to_cursor,
+    get_evaluated_mesh,
 )
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
@@ -209,6 +210,75 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         bm.free()
         return False
 
+
+def create_convex_hull_from_object(obj, push_value=0.0, use_depsgraph=False):
+    """Create a convex hull from all vertices of a single mesh object. Returns the new object or None."""
+    if obj.type != 'MESH' or not obj.data.vertices:
+        return None
+    context = bpy.context
+    mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+    all_vertices = [obj_matrix_world @ mesh.vertices[i].co for i in range(len(mesh.vertices))]
+    if not all_vertices:
+        return None
+    bm = bmesh.new()
+    for v in all_vertices:
+        bm.verts.new(v)
+    bm.verts.ensure_lookup_table()
+    try:
+        ret = bmesh.ops.convex_hull(bm, input=bm.verts)
+        geom_to_remove = list(set(ret.get('geom_interior', []) + ret.get('geom_unused', [])))
+        if geom_to_remove:
+            bmesh.ops.delete(bm, geom=geom_to_remove, context='VERTS')
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        dissolve_angle_deg = context.scene.cursor_bbox_hull_dissolve_angle
+        dissolve_angle_rad = radians(dissolve_angle_deg)
+        if dissolve_angle_deg > 0:
+            bmesh.ops.dissolve_limit(
+                bm, angle_limit=dissolve_angle_rad, use_dissolve_boundaries=True,
+                verts=list(bm.verts), edges=list(bm.edges), delimit={'NORMAL'}
+            )
+            bm.verts.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+        if context.scene.cursor_bbox_hull_use_triangulate:
+            bmesh.ops.triangulate(
+                bm, faces=bm.faces,
+                quad_method=context.scene.cursor_bbox_hull_triangulate_quads,
+                ngon_method=context.scene.cursor_bbox_hull_triangulate_ngons
+            )
+        if abs(push_value) > 0.0001:
+            vert_normals = {v: Vector((0, 0, 0)) for v in bm.verts}
+            for f in bm.faces:
+                for v in f.verts:
+                    vert_normals[v] += f.normal
+            for v in bm.verts:
+                if vert_normals[v].length_squared > 0:
+                    v.co += vert_normals[v].normalized() * push_value
+        if len(bm.verts) > 0:
+            center_of_geometry = sum((v.co for v in bm.verts), Vector((0, 0, 0))) / len(bm.verts)
+            bmesh.ops.translate(bm, verts=bm.verts, vec=-center_of_geometry)
+        else:
+            center_of_geometry = Vector((0, 0, 0))
+        mesh_data = bpy.data.meshes.new("ConvexHull")
+        bm.to_mesh(mesh_data)
+        bm.free()
+        base_name = context.scene.cursor_bbox_name_hull or "Convex"
+        name = f"{base_name}_{obj.name}" if obj.name else base_name
+        new_obj = bpy.data.objects.new(name, mesh_data)
+        new_obj.location = center_of_geometry
+        from ..functions.utils import setup_new_object
+        setup_new_object(context, new_obj, assign_styles=True, move_to_collection=True)
+        return new_obj
+    except Exception as e:
+        print(f"Error creating convex hull from {obj.name}: {e}")
+        bm.free()
+        return None
+
+
 class CursorBBox_OT_interactive_hull(bpy.types.Operator):
     """Create convex hull from marked faces"""
     bl_idname = "cursor_bbox.interactive_hull"
@@ -342,7 +412,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             )
         else:
             context.area.header_text_set(
-                f"{status_text} | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
+                f"{status_text} | G: Hull per object | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
                 f"D: Deps {deps_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
             )
         
@@ -654,6 +724,29 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         if event.type == 'MIDDLEMOUSE' or (event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and not event.shift and not event.ctrl):
             return {'PASS_THROUGH'}
             
+        # G: Create convex hull for each object in selection
+        if event.type == 'G' and event.value == 'PRESS':
+            mesh_objects = [o for o in context.selected_objects if o.type == 'MESH']
+            if not mesh_objects:
+                self.report({'WARNING'}, "No mesh objects in selection")
+                return {'RUNNING_MODAL'}
+            created = []
+            for obj in mesh_objects:
+                hull = create_convex_hull_from_object(obj, self.push_value, self.use_depsgraph)
+                if hull:
+                    created.append(hull)
+            if created:
+                for o in context.selected_objects:
+                    o.select_set(False)
+                for o in created:
+                    o.select_set(True)
+                context.view_layer.objects.active = created[-1]
+                self.report({'INFO'}, f"Created {len(created)} convex hull(s)")
+            else:
+                self.report({'WARNING'}, "Failed to create convex hulls")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
         # Create Hull (Enter/Space)
         if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} and event.value == 'PRESS':
             
