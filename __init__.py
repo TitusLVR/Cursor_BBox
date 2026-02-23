@@ -24,6 +24,7 @@ from .operators.interactive_sphere import CursorBBox_OT_interactive_sphere
 from .operators.collision_vhacd import CursorBBox_OT_collision_vhacd
 from .operators.collision_coacd import CursorBBox_OT_collision_coacd
 from .operators.collision_coacd_u import CursorBBox_OT_collision_coacd_u
+from .operators.check_convexity import CursorBBox_OT_check_convexity
 from .ui.panel import CursorBBox_PT_main
 from .ui.pie_menu import CursorBBox_MT_pie_menu
 
@@ -155,6 +156,7 @@ classes = [
     CursorBBox_OT_collision_vhacd,
     CursorBBox_OT_collision_coacd,
     CursorBBox_OT_collision_coacd_u,
+    CursorBBox_OT_check_convexity,
     CursorBBox_OT_cancel_decomposition,
     CursorBBox_OT_install_coacd_u,
     CursorBBox_PT_main,

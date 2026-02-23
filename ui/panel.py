@@ -205,6 +205,8 @@ class CursorBBox_PT_main(bpy.types.Panel):
         op = row.operator("cursor_bbox.set_cursor", text="Set Cursor Only", icon='CURSOR')
         op.align_to_face = scene.cursor_bbox_align_face
 
+        col.operator("cursor_bbox.check_convexity", text="Check Convexity", icon='CHECKMARK')
+
         layout.separator()
 
         # --- Settings ---

@@ -44,5 +44,5 @@ class CursorBBox_MT_pie_menu(bpy.types.Menu):
         # Southwest: Interactive Sphere
         op = pie.operator("cursor_bbox.interactive_sphere", text="Interactive Sphere", icon='MESH_UVSPHERE')
 
-        # Southeast: (empty)
-        pie.separator()
+        # Southeast: Check Convexity
+        pie.operator("cursor_bbox.check_convexity", text="Check Convexity", icon='CHECKMARK')
