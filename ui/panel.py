@@ -205,7 +205,15 @@ class CursorBBox_PT_main(bpy.types.Panel):
         op = row.operator("cursor_bbox.set_cursor", text="Set Cursor Only", icon='CURSOR')
         op.align_to_face = scene.cursor_bbox_align_face
 
-        col.operator("cursor_bbox.check_convexity", text="Check Convexity", icon='CHECKMARK')
+        row = col.row(align=True)
+        row.operator("cursor_bbox.check_convexity", text="Check Convexity", icon='CHECKMARK')
+        op = row.operator("cursor_bbox.fix_convexity", text="Fix", icon='SHADERFX')
+        op.area_threshold = scene.cursor_bbox_fix_area_threshold
+        op.weld_distance = scene.cursor_bbox_fix_weld_distance
+
+        sub = col.column(align=True)
+        sub.prop(scene, 'cursor_bbox_fix_area_threshold', text="Area Threshold")
+        sub.prop(scene, 'cursor_bbox_fix_weld_distance', text="Weld Distance")
 
         layout.separator()
 

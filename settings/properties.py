@@ -391,6 +391,28 @@ def register():
         default="CursorBBox"
     )
 
+    # Convexity fix settings
+    bpy.types.Scene.cursor_bbox_fix_area_threshold = bpy.props.FloatProperty(
+        name="Area Threshold",
+        description="Faces with area below this value are treated as degenerate and deleted",
+        default=1e-6,
+        min=0.0,
+        max=1.0,
+        precision=6,
+        step=0.01,
+    )
+
+    bpy.types.Scene.cursor_bbox_fix_weld_distance = bpy.props.FloatProperty(
+        name="Weld Distance",
+        description="Merge vertices closer than this distance (0 to skip)",
+        default=0.0001,
+        min=0.0,
+        max=1.0,
+        precision=6,
+        step=0.01,
+        unit='LENGTH',
+    )
+
     bpy.types.Scene.cursor_bbox_hull_dissolve_angle = bpy.props.FloatProperty(
         name="Hull Dissolve Angle",
         description="Angle threshold for dissolving planar faces in convex hull (degrees)",
@@ -481,6 +503,8 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_collection_name
     del bpy.types.Scene.cursor_bbox_material_color
     del bpy.types.Scene.cursor_bbox_use_material
+    del bpy.types.Scene.cursor_bbox_fix_area_threshold
+    del bpy.types.Scene.cursor_bbox_fix_weld_distance
     del bpy.types.Scene.cursor_bbox_hull_dissolve_angle
     del bpy.types.Scene.cursor_bbox_hull_use_triangulate
     del bpy.types.Scene.cursor_bbox_hull_triangulate_quads
