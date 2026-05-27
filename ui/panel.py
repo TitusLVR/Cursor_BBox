@@ -44,7 +44,10 @@ class CursorBBox_PT_main(bpy.types.Panel):
         
         op = subcol.operator("cursor_bbox.interactive_hull", text="Interactive Hull", icon='MESH_ICOSPHERE')
         op.push_value = scene.cursor_bbox_push
-        
+
+        op = subcol.operator("cursor_bbox.hull_per_island", text="Hull Per Island", icon='STICKY_UVS_DISABLE')
+        op.push_value = scene.cursor_bbox_push
+
         op = subcol.operator("cursor_bbox.interactive_sphere", text="Interactive Sphere", icon='MESH_UVSPHERE')
 
         col.separator()

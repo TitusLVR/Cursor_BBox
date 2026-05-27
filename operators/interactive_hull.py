@@ -211,17 +211,18 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         return False
 
 
-def create_convex_hull_from_object(obj, push_value=0.0, use_depsgraph=False):
-    """Create a convex hull from all vertices of a single mesh object. Returns the new object or None."""
-    if obj.type != 'MESH' or not obj.data.vertices:
-        return None
-    context = bpy.context
-    mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
-    all_vertices = [obj_matrix_world @ mesh.vertices[i].co for i in range(len(mesh.vertices))]
-    if not all_vertices:
+def _build_hull_object_from_vertices(context, world_vertices, name, push_value=0.0):
+    """Build a convex hull mesh object from world-space vertex coordinates.
+
+    Applies the same scene settings as the rest of the hull tools
+    (dissolve_limit, triangulate, push) and centers the geometry on its
+    centroid. Returns the new object, or None if no hull geometry results
+    (e.g. fewer than 4 non-coplanar vertices).
+    """
+    if not world_vertices:
         return None
     bm = bmesh.new()
-    for v in all_vertices:
+    for v in world_vertices:
         bm.verts.new(v)
     bm.verts.ensure_lookup_table()
     try:
@@ -250,6 +251,10 @@ def create_convex_hull_from_object(obj, push_value=0.0, use_depsgraph=False):
                 quad_method=context.scene.cursor_bbox_hull_triangulate_quads,
                 ngon_method=context.scene.cursor_bbox_hull_triangulate_ngons
             )
+        # No solid hull (degenerate/collinear/coplanar input) -> skip
+        if not bm.faces:
+            bm.free()
+            return None
         if abs(push_value) > 0.0001:
             vert_normals = {v: Vector((0, 0, 0)) for v in bm.verts}
             for f in bm.faces:
@@ -266,17 +271,85 @@ def create_convex_hull_from_object(obj, push_value=0.0, use_depsgraph=False):
         mesh_data = bpy.data.meshes.new("ConvexHull")
         bm.to_mesh(mesh_data)
         bm.free()
-        base_name = context.scene.cursor_bbox_name_hull or "Convex"
-        name = f"{base_name}_{obj.name}" if obj.name else base_name
         new_obj = bpy.data.objects.new(name, mesh_data)
         new_obj.location = center_of_geometry
         from ..functions.utils import setup_new_object
         setup_new_object(context, new_obj, assign_styles=True, move_to_collection=True)
         return new_obj
     except Exception as e:
-        print(f"Error creating convex hull from {obj.name}: {e}")
+        print(f"Error building convex hull '{name}': {e}")
         bm.free()
         return None
+
+
+def create_convex_hull_from_object(obj, push_value=0.0, use_depsgraph=False):
+    """Create a convex hull from all vertices of a single mesh object. Returns the new object or None."""
+    if obj.type != 'MESH' or not obj.data.vertices:
+        return None
+    context = bpy.context
+    mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+    all_vertices = [obj_matrix_world @ mesh.vertices[i].co for i in range(len(mesh.vertices))]
+    base_name = context.scene.cursor_bbox_name_hull or "Convex"
+    name = f"{base_name}_{obj.name}" if obj.name else base_name
+    return _build_hull_object_from_vertices(context, all_vertices, name, push_value)
+
+
+def split_mesh_into_islands(obj, use_depsgraph=False):
+    """Split a mesh object into connected components (loose parts).
+
+    Returns a list of world-space vertex-coordinate lists, one per island.
+    Vertices are grouped by connectivity through edges; isolated vertices
+    (no edges) each form their own single-vertex island.
+    """
+    if obj.type != 'MESH':
+        return []
+    context = bpy.context
+    mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bm.verts.ensure_lookup_table()
+        islands = []
+        visited = set()
+        for seed in bm.verts:
+            if seed.index in visited:
+                continue
+            # Flood-fill connected vertices through linked edges
+            stack = [seed]
+            visited.add(seed.index)
+            component = []
+            while stack:
+                v = stack.pop()
+                component.append(obj_matrix_world @ v.co.copy())
+                for e in v.link_edges:
+                    other = e.other_vert(v)
+                    if other.index not in visited:
+                        visited.add(other.index)
+                        stack.append(other)
+            islands.append(component)
+        return islands
+    finally:
+        bm.free()
+
+
+def create_convex_hulls_from_object_islands(obj, push_value=0.0, use_depsgraph=False):
+    """Create one convex hull per connected island (loose part) of a mesh object.
+
+    Returns a list of new objects. Islands that produce no hull geometry are
+    skipped. Each hull is named "{hull_name}_{obj.name}_{i}".
+    """
+    if obj.type != 'MESH' or not obj.data.vertices:
+        return []
+    context = bpy.context
+    islands = split_mesh_into_islands(obj, use_depsgraph=use_depsgraph)
+    base_name = context.scene.cursor_bbox_name_hull or "Convex"
+    created = []
+    for i, verts in enumerate(islands):
+        name = f"{base_name}_{obj.name}_{i}" if obj.name else f"{base_name}_{i}"
+        new_obj = _build_hull_object_from_vertices(context, verts, name, push_value)
+        if new_obj:
+            created.append(new_obj)
+    return created
 
 
 class CursorBBox_OT_interactive_hull(bpy.types.Operator):
@@ -412,7 +485,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             )
         else:
             context.area.header_text_set(
-                f"{status_text} | G: Hull per object | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
+                f"{status_text} | G: Hull per object | L: Hull per island | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
                 f"D: Deps {deps_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
             )
         
@@ -742,6 +815,29 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                     o.select_set(True)
                 context.view_layer.objects.active = created[-1]
                 self.report({'INFO'}, f"Created {len(created)} convex hull(s)")
+            else:
+                self.report({'WARNING'}, "Failed to create convex hulls")
+            context.area.tag_redraw()
+            return {'RUNNING_MODAL'}
+
+        # L: Create convex hull per island (loose part) for each selected object
+        if event.type == 'L' and event.value == 'PRESS':
+            mesh_objects = [o for o in context.selected_objects if o.type == 'MESH']
+            if not mesh_objects:
+                self.report({'WARNING'}, "No mesh objects in selection")
+                return {'RUNNING_MODAL'}
+            created = []
+            for obj in mesh_objects:
+                created.extend(
+                    create_convex_hulls_from_object_islands(obj, self.push_value, self.use_depsgraph)
+                )
+            if created:
+                for o in context.selected_objects:
+                    o.select_set(False)
+                for o in created:
+                    o.select_set(True)
+                context.view_layer.objects.active = created[-1]
+                self.report({'INFO'}, f"Created {len(created)} island hull(s)")
             else:
                 self.report({'WARNING'}, "Failed to create convex hulls")
             context.area.tag_redraw()
@@ -1130,3 +1226,65 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         else:
             self.report({'WARNING'}, "Active space must be a View3D")
             return {'CANCELLED'}
+
+
+class CursorBBox_OT_hull_per_island(bpy.types.Operator):
+    """Create a separate convex hull for each connected island (loose part) of every selected mesh object"""
+    bl_idname = "cursor_bbox.hull_per_island"
+    bl_label = "Hull Per Island"
+    bl_description = (
+        "Create a separate convex hull for each connected island (loose part) "
+        "of every selected mesh object"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    push_value: bpy.props.FloatProperty(
+        name="Push Value",
+        description="How much to push convex hull faces outward",
+        default=0.0,
+        min=-1.0,
+        max=1.0,
+        precision=3
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return any(obj.type == 'MESH' for obj in context.selected_objects)
+
+    def invoke(self, context, event):
+        self.push_value = context.scene.cursor_bbox_push
+        return self.execute(context)
+
+    def execute(self, context):
+        if context.active_object and context.active_object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        prefs = get_preferences()
+        use_depsgraph = prefs.use_depsgraph if prefs else True
+
+        mesh_objects = [o for o in context.selected_objects if o.type == 'MESH']
+        if not mesh_objects:
+            self.report({'WARNING'}, "No mesh objects selected")
+            return {'CANCELLED'}
+
+        created = []
+        for obj in mesh_objects:
+            created.extend(
+                create_convex_hulls_from_object_islands(obj, self.push_value, use_depsgraph)
+            )
+
+        if not created:
+            self.report({'WARNING'}, "Failed to create convex hulls")
+            return {'CANCELLED'}
+
+        for o in context.selected_objects:
+            o.select_set(False)
+        for o in created:
+            o.select_set(True)
+        context.view_layer.objects.active = created[-1]
+
+        self.report(
+            {'INFO'},
+            f"Created {len(created)} convex hull(s) from {len(mesh_objects)} object(s)"
+        )
+        return {'FINISHED'}

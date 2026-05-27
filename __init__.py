@@ -19,7 +19,7 @@ from .operators.set_cursor import CursorBBox_OT_set_cursor
 from .operators.set_and_fit_box import CursorBBox_OT_set_and_fit_box
 from .operators.interactive_box import CursorBBox_OT_interactive_box
 from .operators.create_box import CursorBBox_OT_create_box
-from .operators.interactive_hull import CursorBBox_OT_interactive_hull
+from .operators.interactive_hull import CursorBBox_OT_interactive_hull, CursorBBox_OT_hull_per_island
 from .operators.interactive_sphere import CursorBBox_OT_interactive_sphere
 from .operators.collision_vhacd import CursorBBox_OT_collision_vhacd
 from .operators.collision_coacd import CursorBBox_OT_collision_coacd
@@ -152,6 +152,7 @@ classes = [
     CursorBBox_OT_interactive_box,
     CursorBBox_OT_create_box,
     CursorBBox_OT_interactive_hull,
+    CursorBBox_OT_hull_per_island,
     CursorBBox_OT_interactive_sphere,
     CursorBBox_OT_collision_vhacd,
     CursorBBox_OT_collision_coacd,

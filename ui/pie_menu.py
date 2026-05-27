@@ -23,6 +23,9 @@ class CursorBBox_MT_pie_menu(bpy.types.Menu):
         box.operator("cursor_bbox.collision_vhacd", text="V-HACD")
         box.operator("cursor_bbox.collision_coacd", text="CoACD")
         box.operator("cursor_bbox.collision_coacd_u", text="CoACD-U")
+        box.separator(factor=0.3)
+        op = box.operator("cursor_bbox.hull_per_island", text="Hull Per Island")
+        op.push_value = scene.cursor_bbox_push
 
         # South: Interactive Hull
         op = pie.operator("cursor_bbox.interactive_hull", text="Interactive Hull", icon='MESH_ICOSPHERE')
