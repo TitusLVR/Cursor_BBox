@@ -35,6 +35,7 @@ from ..functions.core import (
     enable_face_marking_wrapper as enable_face_marking,
     disable_face_marking_wrapper as disable_face_marking,
     mark_face,
+    mark_faces_batch,
     unmark_face,
     clear_marked_faces,
     update_marked_faces_bbox,
@@ -58,6 +59,9 @@ from ..functions.core import (
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
 from ..settings.preferences import get_preferences
+from ..ui.hud.controller import HUDController
+from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
+from ..functions.undo_stack import OperatorUndoStack
 
 def create_bounding_box_from_marked(marked_faces_dict, marked_points=None, push_value=0.01, select_new_object=True, use_depsgraph=False):
     """Create a bounding box from marked faces and points"""
@@ -248,39 +252,147 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             cleanup_collection_instance_temp(context, instance_info)
         self.instance_data.clear()
     
-    def modal(self, context, event):
-        # Update status bar with modal controls
-        has_marked = bool(self.marked_faces)
-        has_points = bool(self.marked_points)
-        marking_status = ""
-        if has_marked or has_points:
-            parts = []
-            if has_marked:
-                parts.append("Faces")
-            if has_points:
-                parts.append(f"{len(self.marked_points)} Points")
-            marking_status = f" | Marked: {', '.join(parts)}"
-        
-        deps_state = "ON" if self.use_depsgraph else "OFF"
-        coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
-        backface_state = "ON" if get_backface_rendering() else "OFF"
-        preview_cull_state = "ON" if get_preview_culling() else "OFF"
-        
-        if self.point_mode:
-            snap_state = "✓" if self.snap_enabled else "✗"
-            limit_state = "✓" if self.limit_plane_mode else "✗"
-            mode_names = ("All", "Vert", "Edge", "Face")
-            snap_mode_str = mode_names[self.snap_mode]
-            plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
-            context.area.header_text_set(
-                f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {snap_mode_str} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
-            )
+    # --- undo/redo --------------------------------------------------
+    def _snapshot(self):
+        """Capture state that can be restored by Ctrl+Z / Ctrl+Shift+Z."""
+        return {
+            'marked_faces': {obj: set(faces)
+                             for obj, faces in self.marked_faces.items()},
+            'marked_points': [Vector(p) for p in self.marked_points],
+        }
+
+    def _restore_snapshot(self, snap, context):
+        """Apply a snapshot back onto self + rebuild the global state
+        that drives marking visuals and the bbox preview."""
+        self.marked_faces = {obj: set(faces)
+                             for obj, faces in snap['marked_faces'].items()}
+        self.marked_points = [Vector(p) for p in snap['marked_points']]
+        # Rebuild global marking state from operator-local copy.
+        clear_all_markings()
+        for obj, faces in self.marked_faces.items():
+            if faces:
+                mark_faces_batch(obj, faces, use_depsgraph=self.use_depsgraph)
+        for p in self.marked_points:
+            add_marked_point(p)
+        # Refresh bbox preview / clear if nothing left.
+        if self.marked_faces or self.marked_points:
+            cursor_rotation = get_cursor_rotation_euler(context)
+            update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                    context.scene.cursor.location,
+                                    cursor_rotation,
+                                    marked_points=self.marked_points,
+                                    use_depsgraph=self.use_depsgraph)
         else:
-            context.area.header_text_set(
-                f"Space: Create{marking_status} | LMB: Mark | D: Deps {deps_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
-                f"C: Coplanar {coplanar_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
-            )
-        
+            clear_preview_faces()
+        if context.area is not None:
+            context.area.tag_redraw()
+
+    def _push_undo(self):
+        """Snapshot current state before a mutating action."""
+        self.undo_stack.push(self._snapshot())
+
+    def _setup_hud(self, context):
+        """Build the HUDOverlay + HelpOverlay shown while this modal runs."""
+        self.hud_ctl = HUDController("interactive_box", "Interactive Box")
+        # Help overlay — corner-anchored hotkey legend.
+        self.hud_ctl.help.add_section(HUDSection("Object Mode", [
+            HUDItem("Mark / unmark face", "LMB"),
+            HUDItem("Create bounding box", "SPACE"),
+            HUDItem("Enter point mode", "A"),
+            HUDItem("Toggle coplanar selection", "C"),
+            HUDItem("Toggle depsgraph", "D"),
+            HUDItem("Toggle backface render", "P"),
+            HUDItem("Toggle preview culling", "O"),
+            HUDItem("Clear all markings", "Z"),
+            HUDItem("Coplanar angle 1°/5°", "Shift+Wheel"),
+            HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
+            HUDItem("Confirm", "RMB"),
+            HUDItem("Cancel", "ESC"),
+        ]))
+        self.hud_ctl.help.add_section(HUDSection("Point Mode", [
+            HUDItem("Add point", "LMB"),
+            HUDItem("Snap on/off", "S"),
+            HUDItem("Snap to Vert / Edge / Face", "1 / 2 / 3"),
+            HUDItem("Cycle cursor plane", "R"),
+            HUDItem("Set cursor location", "E"),
+            HUDItem("Snap threshold", "Ctrl+Wheel"),
+            HUDItem("Toggle limit plane", "C"),
+            HUDItem("Exit point mode", "A"),
+        ]))
+        # Live parameter dashboard (HUDOverlay).
+        from ..functions.utils import CURSOR_PLANE_ALIGNMENTS as _PLANES
+        _mode_names = ("All", "Vert", "Edge", "Face")
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Mode", lambda: "POINT" if self.point_mode else "MARK"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Marked faces",
+            lambda: sum(len(v) for v in self.marked_faces.values()),
+            kind="int"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Marked points",
+            lambda: len(self.marked_points),
+            kind="int"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Push", lambda: self.push_value, kind="float", fmt="{:.3f}"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Coplanar angle°",
+            lambda: int(round(degrees(context.scene.cursor_bbox_coplanar_angle))),
+            kind="int"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Depsgraph", lambda: self.use_depsgraph, kind="bool"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Backface", lambda: get_backface_rendering(), kind="bool"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Preview cull", lambda: get_preview_culling(), kind="bool"))
+        # Point-mode-only rows.
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Snap", lambda: self.snap_enabled, kind="bool",
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Snap mode",
+            lambda: _mode_names[self.snap_mode],
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Snap threshold px",
+            lambda: self.snap_threshold,
+            kind="int",
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Cursor plane",
+            lambda: _PLANES[self.cursor_plane_align],
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Limit plane",
+            lambda: self.limit_plane_mode,
+            kind="bool",
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.attach(context)
+
+    def modal(self, context, event):
+        # HUD: capture event for cursor-follow + forward toggle/drag events.
+        if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+            self.hud_ctl.update_event(event, context)
+            if self.hud_ctl.handle_events(context, event):
+                return {'RUNNING_MODAL'}
+
+        # Undo / Redo (Ctrl+Z / Ctrl+Shift+Z)
+        if (event.type == 'Z' and event.value == 'PRESS'
+                and event.ctrl and not event.alt):
+            if event.shift:
+                snap = self.undo_stack.pop_redo(self._snapshot())
+                if snap is not None:
+                    self._restore_snapshot(snap, context)
+                    self.report({'INFO'}, "Redo")
+                else:
+                    self.report({'INFO'}, "Nothing to redo")
+            else:
+                snap = self.undo_stack.pop_undo(self._snapshot())
+                if snap is not None:
+                    self._restore_snapshot(snap, context)
+                    self.report({'INFO'}, "Undo")
+                else:
+                    self.report({'INFO'}, "Nothing to undo")
+            return {'RUNNING_MODAL'}
 
         # Cancel (Esc)
         if event.type == 'ESC':
@@ -295,7 +407,8 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             disable_limitation_plane(context)  # Ensure visual is off
             self.cleanup_all_instances(context)  # Clean up collection instances
             restore_selection_state(context, self._restore_selected, self._restore_active)
-            context.area.header_text_set(None)
+            if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+                self.hud_ctl.detach(context)
             return {'CANCELLED'}
 
         # Finished (RMB)
@@ -311,7 +424,8 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             disable_limitation_plane(context)  # Ensure visual is off
             self.cleanup_all_instances(context)  # Clean up collection instances
             restore_selection_state(context, self._restore_selected, self._restore_active)
-            context.area.header_text_set(None)
+            if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+                self.hud_ctl.detach(context)
             return {'FINISHED'}
 
         # Snap mode 1=Vertex, 2=Edge, 3=Face (point mode only)
@@ -429,26 +543,6 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
                 context.area.tag_redraw()
             
-            # Force update header immediately
-            if self.point_mode:
-                snap_state = "✓" if self.snap_enabled else "✗"
-                limit_state = "✓" if self.limit_plane_mode else "✗"
-                mode_names = ("All", "Vert", "Edge", "Face")
-                plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
-                context.area.header_text_set(
-                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {mode_names[self.snap_mode]} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
-                )
-            else:
-                marking_status = f" ({len(self.marked_faces)} objects marked)" if self.marked_faces else ""
-                coplanar_state = "✓" if context.scene.cursor_bbox_select_coplanar else "✗"
-                backface_state = "✓" if get_backface_rendering() else "✗"
-                deps_state = "✓" if self.use_depsgraph else "✗"
-                preview_cull_state = "✓" if get_preview_culling() else "✗"
-                
-                context.area.header_text_set(
-                 f"Space: Create{marking_status} | LMB: Mark | D: Deps {deps_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
-                 f"C: Coplanar {coplanar_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
-                )
             return {'RUNNING_MODAL'}
         
         # Toggle Depsgraph (D)
@@ -548,6 +642,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} and event.value == 'PRESS':
             # Create bounding box based on marked faces and/or points
             if self.marked_faces or self.marked_points:
+                self._push_undo()
                 # Create bbox from marked faces and points
                 if create_bounding_box_from_marked(self.marked_faces, self.marked_points, self.push_value, select_new_object=False, use_depsgraph=self.use_depsgraph):
                     self.report({'INFO'}, "Created Bounding Box. Ready for new selection.")
@@ -574,8 +669,9 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             
             return {'RUNNING_MODAL'}
         
-        # Mark Face (LMB)
+        # Mark Face (LMB) — snapshot before any state-mutating click.
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            self._push_undo()
             if self.point_mode:
                 # Add Point Logic
                 face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
@@ -732,6 +828,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         elif event.type == 'Z' and event.value == 'PRESS':
             # Clear all marked faces and points
             if self.marked_faces or self.marked_points:
+                self._push_undo()
                 clear_all_markings()  # Clear global state
                 clear_preview_faces()
                 self.marked_faces.clear()  # Clear local state
@@ -922,6 +1019,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         self.limit_plane_mode = False
         self.limitation_plane_matrix = None
         self.instance_data = {}
+        self.undo_stack = OperatorUndoStack()
 
         # Get use_depsgraph from preferences
         prefs = get_preferences()
@@ -990,6 +1088,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             enable_edge_highlight()
             enable_bbox_preview()
             enable_face_marking()
+            self._setup_hud(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:

@@ -254,20 +254,6 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
                     _state.gpu_manager.clear_cache_key('bbox_edges')
     
     def modal(self, context, event):
-        # Update status bar with modal controls
-        deps_state = "ON" if self.use_depsgraph else "OFF"
-        mode_text = ""
-        if self.bbox_mode == 'world':
-            mode_text = " [World]"
-        elif self.bbox_mode == 'local':
-            mode_text = " [Local]"
-        
-        extend_text = ""
-        if self.extend_mode:
-            extend_text = f" [Extend: {len(self.extend_objects)} obj(s)]"
-        
-        context.area.header_text_set(f"LMB: Create{mode_text}{extend_text} | E: Extend | G: All Combined | A: All Individual | W: World | Q: Local | D: Deps {deps_state} | RMB: Done | ESC: Cancel")
-        
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
             return {'PASS_THROUGH'}
@@ -561,7 +547,6 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             disable_bbox_preview()
             self.cleanup_all_instances(context)  # Clean up collection instances
             self.restore_selection(context)  # Restore original selection
-            context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
 
         elif event.type == 'RIGHTMOUSE':
@@ -573,7 +558,6 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             disable_bbox_preview()
             self.cleanup_all_instances(context)  # Clean up collection instances
             self.restore_selection(context)  # Restore original selection
-            context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
         
         return {'RUNNING_MODAL'}

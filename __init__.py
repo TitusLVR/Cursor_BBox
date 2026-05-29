@@ -27,6 +27,10 @@ from .operators.collision_coacd_u import CursorBBox_OT_collision_coacd_u
 from .operators.check_convexity import CursorBBox_OT_check_convexity, CursorBBox_OT_fix_convexity
 from .ui.panel import CursorBBox_PT_main
 from .ui.pie_menu import CursorBBox_MT_pie_menu
+from .settings.hud_theme import (CursorBBox_HUD_Theme,
+                                 CursorBBox_OT_HudThemeResetDefaults)
+from .operators.ui_toggles import (CursorBBox_OT_HelpToggleMarker,
+                                   CursorBBox_OT_HudParamsToggleMarker)
 
 
 class CursorBBox_OT_cancel_decomposition(bpy.types.Operator):
@@ -146,7 +150,13 @@ class CursorBBox_OT_install_coacd_u(bpy.types.Operator):
 
 
 classes = [
+    # HUD theme PropertyGroup must register BEFORE CursorBBoxPreferences
+    # so the PointerProperty inside the prefs class can resolve it.
+    CursorBBox_HUD_Theme,
     CursorBBoxPreferences,
+    CursorBBox_OT_HudThemeResetDefaults,
+    CursorBBox_OT_HelpToggleMarker,
+    CursorBBox_OT_HudParamsToggleMarker,
     CursorBBox_OT_set_cursor,
     CursorBBox_OT_set_and_fit_box,
     CursorBBox_OT_interactive_box,
@@ -178,6 +188,15 @@ def register_keymap():
 
     kmi = km.keymap_items.new("wm.call_menu_pie", 'C', 'PRESS', shift=True, alt=True)
     kmi.properties.name = "CURSOR_BBOX_MT_pie_menu"
+    addon_keymaps.append((km, kmi))
+
+    # HUD / Help overlay toggle markers — these are no-op operators whose
+    # bound keys are read by the HUD/Help overlays during modal operators.
+    kmi = km.keymap_items.new("cursor_bbox.ui_help_toggle",
+                              'H', 'PRESS')
+    addon_keymaps.append((km, kmi))
+    kmi = km.keymap_items.new("cursor_bbox.ui_hud_params_toggle",
+                              'SLASH', 'PRESS')
     addon_keymaps.append((km, kmi))
 
 def unregister_keymap():

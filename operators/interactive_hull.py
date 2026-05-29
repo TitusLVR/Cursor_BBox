@@ -36,6 +36,7 @@ from ..functions.core import (
     enable_face_marking_wrapper as enable_face_marking,
     disable_face_marking_wrapper as disable_face_marking,
     mark_face,
+    mark_faces_batch,
     unmark_face,
     clear_marked_faces,
     update_marked_faces_bbox,
@@ -62,6 +63,9 @@ from ..functions.core import (
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
 from ..settings.preferences import get_preferences
+from ..ui.hud.controller import HUDController
+from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
+from ..functions.undo_stack import OperatorUndoStack
 
 
 def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False, face_thickness=0.0):
@@ -446,49 +450,170 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             return getattr(self, '_thickness_cursor_value', self.face_thickness)
         return self.face_thickness
     
-    def modal(self, context, event):
-        # Update status bar
-        has_marked = bool(self.marked_faces)
-        has_points = bool(self.marked_points)
-        status_text = "Space: Create Hull"
-        if has_marked or has_points:
-            parts = []
-            if has_marked: parts.append("Faces")
-            if has_points: parts.append(f"{len(self.marked_points)} Points")
-            status_text += f" | Marked: {', '.join(parts)}"
-        # Thickness: in thickness mode preview follows cursor; else show stored value
-        if not self.thickness_mode:
-            if abs(self.face_thickness) > 1e-5:
-                status_text += f" | T: Thickness ({self.face_thickness:.3f})"
-            else:
-                status_text += " | T: Thickness Mode"
-        
-        deps_state = "ON" if self.use_depsgraph else "OFF"
-        coplanar_state = "ON" if context.scene.cursor_bbox_select_coplanar else "OFF"
-        backface_state = "ON" if get_backface_rendering() else "OFF"
-        preview_cull_state = "ON" if get_preview_culling() else "OFF"
-        
-        if self.point_mode:
-            snap_state = "✓" if self.snap_enabled else "✗"
-            limit_state = "✓" if self.limit_plane_mode else "✗"
-            mode_names = ("All", "Vert", "Edge", "Face")
-            snap_mode_str = mode_names[self.snap_mode]
-            plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
-            context.area.header_text_set(
-                f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {snap_mode_str} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
-            )
-        elif self.thickness_mode:
-            preview_val = self._get_preview_thickness()
-            from_cursor_state = "ON" if getattr(self, 'thickness_from_cursor', False) else "OFF"
-            context.area.header_text_set(
-                f"THICKNESS MODE | Preview: {preview_val:.3f} | C: From Cursor {from_cursor_state} | LMB: Place Cursor | R: Reset 0 | Alt+Scroll: Adjust | T: Exit | RMB: Done | ESC: Cancel"
-            )
+    # --- undo/redo --------------------------------------------------
+    def _snapshot(self):
+        return {
+            'marked_faces': {obj: set(faces)
+                             for obj, faces in self.marked_faces.items()},
+            'marked_points': [Vector(p) for p in self.marked_points],
+            'face_thickness': float(self.face_thickness),
+            'thickness_from_cursor': bool(self.thickness_from_cursor),
+        }
+
+    def _restore_snapshot(self, snap, context):
+        self.marked_faces = {obj: set(faces)
+                             for obj, faces in snap['marked_faces'].items()}
+        self.marked_points = [Vector(p) for p in snap['marked_points']]
+        self.face_thickness = snap['face_thickness']
+        self.thickness_from_cursor = snap['thickness_from_cursor']
+        clear_all_markings()
+        for obj, faces in self.marked_faces.items():
+            if faces:
+                mark_faces_batch(obj, faces, use_depsgraph=self.use_depsgraph)
+        for p in self.marked_points:
+            add_marked_point(p)
+        if self.marked_faces or self.marked_points:
+            update_marked_faces_convex_hull(
+                self.marked_faces, self.push_value,
+                marked_points=self.marked_points,
+                face_thickness=self._get_preview_thickness(),
+                use_depsgraph=self.use_depsgraph)
         else:
-            context.area.header_text_set(
-                f"{status_text} | G: Hull per object | L: Hull per island | LMB: Mark | C: Coplanar {coplanar_state} | P: Backface {backface_state} | O: Cull {preview_cull_state} | "
-                f"D: Deps {deps_state} | 1-7/Shift+Scroll: Angle {int(round(degrees(context.scene.cursor_bbox_coplanar_angle)))}° | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
-            )
-        
+            clear_preview_faces()
+        if context.area is not None:
+            context.area.tag_redraw()
+
+    def _push_undo(self):
+        self.undo_stack.push(self._snapshot())
+
+    def _setup_hud(self, context):
+        """Build the HUDOverlay + HelpOverlay shown while this modal runs."""
+        self.hud_ctl = HUDController("interactive_hull", "Interactive Hull")
+        self.hud_ctl.help.add_section(HUDSection("Object Mode", [
+            HUDItem("Mark / unmark face", "LMB"),
+            HUDItem("Create hull", "SPACE"),
+            HUDItem("Hull per object", "G"),
+            HUDItem("Hull per island", "L"),
+            HUDItem("Enter point mode", "A"),
+            HUDItem("Thickness mode", "T"),
+            HUDItem("Toggle coplanar", "C"),
+            HUDItem("Toggle depsgraph", "D"),
+            HUDItem("Toggle backface render", "P"),
+            HUDItem("Toggle preview culling", "O"),
+            HUDItem("Clear markings", "Z"),
+            HUDItem("Coplanar angle 1°/5°", "Shift+Wheel"),
+            HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
+            HUDItem("Confirm", "RMB"),
+            HUDItem("Cancel", "ESC"),
+        ]))
+        self.hud_ctl.help.add_section(HUDSection("Point Mode", [
+            HUDItem("Add point", "LMB"),
+            HUDItem("Snap on/off", "S"),
+            HUDItem("Snap to Vert / Edge / Face", "1 / 2 / 3"),
+            HUDItem("Cycle cursor plane", "R"),
+            HUDItem("Set cursor location", "E"),
+            HUDItem("Snap threshold", "Ctrl+Wheel"),
+            HUDItem("Toggle limit plane", "C"),
+            HUDItem("Exit point mode", "A"),
+        ]))
+        self.hud_ctl.help.add_section(HUDSection("Thickness Mode", [
+            HUDItem("Place cursor", "LMB"),
+            HUDItem("Adjust thickness", "Alt+Wheel"),
+            HUDItem("From cursor on/off", "C"),
+            HUDItem("Reset to 0", "R"),
+            HUDItem("Exit thickness mode", "T"),
+        ]))
+        from ..functions.utils import CURSOR_PLANE_ALIGNMENTS as _PLANES
+        _mode_names = ("All", "Vert", "Edge", "Face")
+
+        def _mode_str():
+            if self.point_mode:
+                return "POINT"
+            if self.thickness_mode:
+                return "THICKNESS"
+            return "MARK"
+
+        self.hud_ctl.hud.add_param(HUDParam("Mode", _mode_str))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Marked faces",
+            lambda: sum(len(v) for v in self.marked_faces.values()),
+            kind="int"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Marked points",
+            lambda: len(self.marked_points),
+            kind="int"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Push", lambda: self.push_value, kind="float", fmt="{:.3f}"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Thickness",
+            lambda: self._get_preview_thickness(),
+            kind="float", fmt="{:.3f}"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Coplanar angle°",
+            lambda: int(round(degrees(context.scene.cursor_bbox_coplanar_angle))),
+            kind="int"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Depsgraph", lambda: self.use_depsgraph, kind="bool"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Backface", lambda: get_backface_rendering(), kind="bool"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Preview cull", lambda: get_preview_culling(), kind="bool"))
+        # Point-mode-only rows.
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Snap", lambda: self.snap_enabled, kind="bool",
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Snap mode",
+            lambda: _mode_names[self.snap_mode],
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Snap threshold px",
+            lambda: self.snap_threshold,
+            kind="int",
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Cursor plane",
+            lambda: _PLANES[self.cursor_plane_align],
+            visible_getter=lambda: self.point_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Limit plane",
+            lambda: self.limit_plane_mode,
+            kind="bool",
+            visible_getter=lambda: self.point_mode))
+        # Thickness-mode-only row.
+        self.hud_ctl.hud.add_param(HUDParam(
+            "From cursor",
+            lambda: getattr(self, 'thickness_from_cursor', False),
+            kind="bool",
+            visible_getter=lambda: self.thickness_mode))
+        self.hud_ctl.attach(context)
+
+    def modal(self, context, event):
+        # HUD: capture event for cursor-follow + forward toggle/drag events.
+        if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+            self.hud_ctl.update_event(event, context)
+            if self.hud_ctl.handle_events(context, event):
+                return {'RUNNING_MODAL'}
+
+        # Undo / Redo (Ctrl+Z / Ctrl+Shift+Z)
+        if (event.type == 'Z' and event.value == 'PRESS'
+                and event.ctrl and not event.alt):
+            if event.shift:
+                snap = self.undo_stack.pop_redo(self._snapshot())
+                if snap is not None:
+                    self._restore_snapshot(snap, context)
+                    self.report({'INFO'}, "Redo")
+                else:
+                    self.report({'INFO'}, "Nothing to redo")
+            else:
+                snap = self.undo_stack.pop_undo(self._snapshot())
+                if snap is not None:
+                    self._restore_snapshot(snap, context)
+                    self.report({'INFO'}, "Undo")
+                else:
+                    self.report({'INFO'}, "Nothing to undo")
+            return {'RUNNING_MODAL'}
+
         # Snap mode 1=Vertex, 2=Edge, 3=Face (point mode only)
         if self.point_mode and event.value == 'PRESS':
             if event.type in ('ONE', 'NUMPAD_1'):
@@ -776,21 +901,6 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                 self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
                 context.area.tag_redraw()
             
-            # Force update header immediately
-            if self.point_mode:
-                snap_state = "✓" if self.snap_enabled else "✗"
-                limit_state = "✓" if self.limit_plane_mode else "✗"
-                mode_names = ("All", "Vert", "Edge", "Face")
-                plane_str = CURSOR_PLANE_ALIGNMENTS[self.cursor_plane_align]
-                context.area.header_text_set(
-                    f"POINT MODE | LMB: Add | S: Snap {snap_state} | 1/2/3: {mode_names[self.snap_mode]} | R: {plane_str} | E: Loc | Ctrl+Scroll: Threshold {self.snap_threshold}px | C: Limit Plane {limit_state} | A: Exit | RMB: Done | ESC: Cancel"
-                )
-            else:
-                marking_status = f" ({len(self.marked_faces)} marked)" if self.marked_faces else ""
-                context.area.header_text_set(
-                    f"Space: Create Hull{marking_status} | LMB: Mark | Ctrl+Scroll: Threshold {self.snap_threshold}px | A: Point Mode | Z: Clear | RMB: Done | ESC: Cancel"
-                )
-            
             return {'RUNNING_MODAL'}
 
         # Navigation (Pass through unless Shift is held for angle adjustment or Ctrl for snap threshold)
@@ -845,8 +955,9 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
 
         # Create Hull (Enter/Space)
         if event.type in {'RET', 'NUMPAD_ENTER', 'SPACE'} and event.value == 'PRESS':
-            
+
             if self.marked_faces or self.marked_points:
+                self._push_undo()
                 if create_convex_hull_from_marked(
                     self.marked_faces, self.marked_points, self.push_value,
                     select_new_object=False, use_depsgraph=self.use_depsgraph, face_thickness=self.face_thickness
@@ -872,6 +983,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             
         # Mark Face (LMB)
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            self._push_undo()
             if self.point_mode:
                 # Add Point Logic
                 face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
@@ -1099,6 +1211,8 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             
         # Clear (Z)
         elif event.type == 'Z' and event.value == 'PRESS':
+            if self.marked_faces or self.marked_points:
+                self._push_undo()
             clear_all_markings()
             self.marked_faces.clear()
             self.marked_points.clear()
@@ -1117,7 +1231,8 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             clear_limitation_plane()
             self.cleanup_all_instances(context)  # Clean up collection instances
             restore_selection_state(context, self._restore_selected, self._restore_active)
-            context.area.header_text_set(None)
+            if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+                self.hud_ctl.detach(context)
             context.area.tag_redraw()
             return {'CANCELLED'}
 
@@ -1133,7 +1248,8 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             clear_limitation_plane()
             self.cleanup_all_instances(context)  # Clean up collection instances
             restore_selection_state(context, self._restore_selected, self._restore_active)
-            context.area.header_text_set(None)
+            if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+                self.hud_ctl.detach(context)
             context.area.tag_redraw()
             return {'FINISHED'}
             
@@ -1154,6 +1270,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         self.limit_plane_mode = False
         self.limitation_plane_matrix = None
         self.instance_data = {}
+        self.undo_stack = OperatorUndoStack()
 
         # Get use_depsgraph from preferences
         prefs = get_preferences()
@@ -1221,6 +1338,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             enable_face_marking()
             enable_edge_highlight()
             enable_bbox_preview()
+            self._setup_hud(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:

@@ -24,9 +24,6 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
     current_face_data = None
     
     def modal(self, context, event):
-        # Update status bar with modal controls
-        context.area.header_text_set("LMB: Place | Scroll: Edge | S: Snap | RMB: Done | ESC: Cancel")
-        
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
             return {'PASS_THROUGH'}
@@ -45,9 +42,8 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
             
             disable_edge_highlight()
             disable_bbox_preview()
-            context.area.header_text_set(None)  # Clear status bar
             return {'FINISHED'}
-        
+
         elif event.type == 'WHEELUPMOUSE' and not event.shift and not event.ctrl:
             # Get face data first
             face_data = get_face_edges_from_raycast(context, event)
@@ -101,13 +97,11 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
         elif event.type == 'ESC':
             disable_edge_highlight()
             disable_bbox_preview()
-            context.area.header_text_set(None)  # Clear status bar
             return {'CANCELLED'}
 
         elif event.type == 'RIGHTMOUSE':
             disable_edge_highlight()
             disable_bbox_preview()
-            context.area.header_text_set(None)  # Clear status bar
             return {'FINISHED'}
         
         return {'RUNNING_MODAL'}

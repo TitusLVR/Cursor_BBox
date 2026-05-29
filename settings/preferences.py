@@ -1,7 +1,11 @@
 import os
 import bpy
 from bpy.types import AddonPreferences
-from bpy.props import FloatProperty, BoolProperty, FloatVectorProperty, EnumProperty, StringProperty
+from bpy.props import (FloatProperty, BoolProperty, FloatVectorProperty,
+                       EnumProperty, StringProperty, PointerProperty)
+
+from .hud_theme import CursorBBox_HUD_Theme, draw_hud_theme_tab
+
 
 class CursorBBoxPreferences(AddonPreferences):
     """Addon preferences for Cursor Aligned Bounding Box"""
@@ -164,6 +168,9 @@ class CursorBBoxPreferences(AddonPreferences):
         min=0.0,
         max=1.0
     )
+
+    # HUD theme (colors, sizes, placement, animation) — see hud_theme.py
+    hud_theme: PointerProperty(type=CursorBBox_HUD_Theme)
 
     # General Settings
     use_depsgraph: BoolProperty(
@@ -341,12 +348,19 @@ class CursorBBoxPreferences(AddonPreferences):
             # Bounding box display
             box = layout.box()
             box.label(text="Bounding Box Display:", icon='CUBE')
-            
+
             row = box.row()
             row.prop(self, "bbox_show_wire")
-            
+
             row = box.row()
             row.prop(self, "bbox_show_all_edges")
+
+            layout.separator()
+
+            # HUD / Help overlay theme
+            box = layout.box()
+            box.label(text="HUD & Help Overlay:", icon='WINDOW')
+            draw_hud_theme_tab(box, self.hud_theme)
 
 def get_preferences():
     """Get addon preferences"""
