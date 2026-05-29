@@ -21,6 +21,8 @@ from ..functions.core import (
     enable_bbox_preview_wrapper as enable_bbox_preview,
     disable_bbox_preview_wrapper as disable_bbox_preview
 )
+from ..ui.hud.controller import HUDController
+from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
 
 class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
     """Place cursor and create bounding box in one action with edge selection"""
@@ -253,7 +255,42 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
                     _state.gpu_manager.clear_cache_key('bbox_faces')
                     _state.gpu_manager.clear_cache_key('bbox_edges')
     
+    def _setup_hud(self, context):
+        """Build the HUDOverlay + HelpOverlay shown while this modal runs."""
+        self.hud_ctl = HUDController("set_and_fit_box", "Set & Fit Box")
+        self.hud_ctl.help.add_section(HUDSection("Actions", [
+            HUDItem("Create bbox under cursor", "LMB"),
+            HUDItem("Toggle extend mode", "E"),
+            HUDItem("All combined", "G"),
+            HUDItem("All individual", "A"),
+            HUDItem("World-oriented", "W"),
+            HUDItem("Local-oriented", "Q"),
+            HUDItem("Toggle depsgraph", "D"),
+            HUDItem("Confirm", "RMB"),
+            HUDItem("Cancel", "ESC"),
+        ]))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Mode", lambda: (self.bbox_mode or "cursor").upper()))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Extend", lambda: self.extend_mode, kind="bool"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Extend objects",
+            lambda: len(self.extend_objects),
+            kind="int",
+            visible_getter=lambda: self.extend_mode))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Push", lambda: self.push_value, kind="float", fmt="{:.3f}"))
+        self.hud_ctl.hud.add_param(HUDParam(
+            "Depsgraph", lambda: self.use_depsgraph, kind="bool"))
+        self.hud_ctl.attach(context)
+
     def modal(self, context, event):
+        # HUD: capture event for cursor-follow + forward toggle/drag events.
+        if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+            self.hud_ctl.update_event(event, context)
+            if self.hud_ctl.handle_events(context, event):
+                return {'RUNNING_MODAL'}
+
         # Allow navigation events to pass through
         if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'} and event.shift:
             return {'PASS_THROUGH'}
@@ -547,6 +584,8 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             disable_bbox_preview()
             self.cleanup_all_instances(context)  # Clean up collection instances
             self.restore_selection(context)  # Restore original selection
+            if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+                self.hud_ctl.detach(context)
             return {'CANCELLED'}
 
         elif event.type == 'RIGHTMOUSE':
@@ -558,6 +597,8 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             disable_bbox_preview()
             self.cleanup_all_instances(context)  # Clean up collection instances
             self.restore_selection(context)  # Restore original selection
+            if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
+                self.hud_ctl.detach(context)
             return {'CANCELLED'}
         
         return {'RUNNING_MODAL'}
@@ -594,6 +635,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             
             enable_edge_highlight()
             enable_bbox_preview()
+            self._setup_hud(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:
