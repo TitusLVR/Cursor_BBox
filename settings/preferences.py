@@ -7,6 +7,29 @@ from bpy.props import (FloatProperty, BoolProperty, FloatVectorProperty,
 from .hud_theme import CursorBBox_HUD_Theme, draw_hud_theme_tab
 
 
+def _pref_rollout(layout, prefs, prop_name, title, *, icon="NONE", split=False):
+    """Collapsible box header backed by a BoolProperty fold-state on `prefs`.
+    Returns the body column when open, else None. Mirrors hud_theme._hud_section.
+
+    `split=True` enables Blender's aligned label/field layout (property split)
+    on the body — use for leaf sections that draw `prop()`s directly.
+    """
+    box = layout.box()
+    row = box.row(align=True)
+    is_open = getattr(prefs, prop_name)
+    row.prop(prefs, prop_name, text="",
+             icon="TRIA_DOWN" if is_open else "TRIA_RIGHT",
+             emboss=False)
+    row.label(text=title, icon=icon)
+    if not is_open:
+        return None
+    body = box.column(align=True)
+    if split:
+        body.use_property_split = True
+        body.use_property_decorate = False
+    return body
+
+
 class CursorBBoxPreferences(AddonPreferences):
     """Addon preferences for Cursor Aligned Bounding Box"""
     bl_idname = "Cursor_BBox"
@@ -87,6 +110,54 @@ class CursorBBoxPreferences(AddonPreferences):
         default=True
     )
     
+    # Fold states for the UI-tab rollouts (UI only).
+    # Parent groups default open; leaf sections default collapsed.
+    show_grp_preview: BoolProperty(
+        name="Viewport Preview",
+        description="Show the in-progress preview settings",
+        default=True
+    )
+    show_grp_appearance: BoolProperty(
+        name="Viewport Appearance",
+        description="Show the persistent viewport appearance settings",
+        default=True
+    )
+    show_bbox_preview: BoolProperty(
+        name="Bounding Box Preview",
+        description="Show the bounding box preview settings",
+        default=False
+    )
+    show_face_hover_preview: BoolProperty(
+        name="Face Hover Preview",
+        description="Show the face hover preview settings",
+        default=False
+    )
+    show_point_preview: BoolProperty(
+        name="Point Preview",
+        description="Show the point preview settings",
+        default=False
+    )
+    show_edge_highlight: BoolProperty(
+        name="Edge Highlight",
+        description="Show the edge highlight settings",
+        default=False
+    )
+    show_face_marking: BoolProperty(
+        name="Face Marking",
+        description="Show the face marking settings",
+        default=False
+    )
+    show_bbox_display: BoolProperty(
+        name="Bounding Box Display",
+        description="Show the bounding box display settings",
+        default=False
+    )
+    show_hud_overlay: BoolProperty(
+        name="HUD & Help Overlay",
+        description="Show the HUD and Help overlay theme settings",
+        default=False
+    )
+
     # BBox preview settings - Updated to #FFFFFF
     bbox_preview_enabled: BoolProperty(
         name="Show BBox Preview",
@@ -271,96 +342,71 @@ class CursorBBoxPreferences(AddonPreferences):
                 col.label(text="Keyconfig not found", icon='ERROR')
 
         elif self.active_tab == 'UI':
-            # BBox preview settings
-            box = layout.box()
-            box.label(text="Bounding Box Preview:", icon='GHOST_ENABLED')
-            
-            row = box.row()
-            row.prop(self, "bbox_preview_enabled")
-            
-            if self.bbox_preview_enabled:
-                row = box.row()
-                row.prop(self, "bbox_preview_color")
-                
-                row = box.row()
-                row.prop(self, "bbox_preview_alpha")
-                
-                row = box.row()
-                row.prop(self, "bbox_preview_line_width")
-                
-                row = box.row()
-                row.prop(self, "bbox_preview_show_faces")
-                
-                if self.bbox_preview_show_faces:
-                    row = box.row()
-                    row.prop(self, "bbox_preview_face_alpha_multiplier")
-            
-            layout.separator()
-            
-            # Preview faces (hover) settings
-            box = layout.box()
-            box.label(text="Face Hover Preview:", icon='GHOST_ENABLED')
-            
-            row = box.row()
-            row.prop(self, "preview_faces_color")
-            
-            row = box.row()
-            row.prop(self, "preview_faces_alpha")
-            
-            layout.separator()
-            
-            # Preview point settings
-            box = layout.box()
-            box.label(text="Point Preview:", icon='EMPTY_AXIS')
-            
-            row = box.row()
-            row.prop(self, "preview_point_color")
-            
-            row = box.row()
-            row.prop(self, "preview_point_alpha")
-            
-            layout.separator()
-            
-            # Visual settings
-            box = layout.box()
-            box.label(text="Visual Settings:", icon='COLOR')
-            
-            row = box.row()
-            row.prop(self, "edge_highlight_color")
-            
-            row = box.row()
-            row.prop(self, "edge_highlight_width")
-            
-            layout.separator()
-            
-            # Face marking settings
-            box = layout.box()
-            box.label(text="Face Marking:", icon='FACE_MAPS')
-            
-            row = box.row()
-            row.prop(self, "face_marking_color")
-            
-            row = box.row()
-            row.prop(self, "face_marking_alpha")
-            
-            layout.separator()
-            
-            # Bounding box display
-            box = layout.box()
-            box.label(text="Bounding Box Display:", icon='CUBE')
+            # --- Group: Viewport Preview (in-progress overlays) ---
+            grp = _pref_rollout(layout, self, "show_grp_preview",
+                                "Viewport Preview", icon='GHOST_ENABLED')
+            if grp is not None:
+                body = _pref_rollout(grp, self, "show_bbox_preview",
+                                     "Bounding Box Preview",
+                                     icon='MESH_CUBE', split=True)
+                if body is not None:
+                    body.prop(self, "bbox_preview_enabled")
+                    if self.bbox_preview_enabled:
+                        body.prop(self, "bbox_preview_color")
+                        body.prop(self, "bbox_preview_alpha")
+                        body.prop(self, "bbox_preview_line_width")
+                        body.prop(self, "bbox_preview_show_faces")
+                        if self.bbox_preview_show_faces:
+                            body.prop(self, "bbox_preview_face_alpha_multiplier")
 
-            row = box.row()
-            row.prop(self, "bbox_show_wire")
+                body = _pref_rollout(grp, self, "show_face_hover_preview",
+                                     "Face Hover Preview",
+                                     icon='FACESEL', split=True)
+                if body is not None:
+                    body.prop(self, "preview_faces_color")
+                    body.prop(self, "preview_faces_alpha")
 
-            row = box.row()
-            row.prop(self, "bbox_show_all_edges")
+                body = _pref_rollout(grp, self, "show_point_preview",
+                                     "Point Preview",
+                                     icon='EMPTY_AXIS', split=True)
+                if body is not None:
+                    body.prop(self, "preview_point_color")
+                    body.prop(self, "preview_point_alpha")
 
             layout.separator()
 
-            # HUD / Help overlay theme
-            box = layout.box()
-            box.label(text="HUD & Help Overlay:", icon='WINDOW')
-            draw_hud_theme_tab(box, self.hud_theme)
+            # --- Group: Viewport Appearance (persistent visuals) ---
+            grp = _pref_rollout(layout, self, "show_grp_appearance",
+                                "Viewport Appearance", icon='COLOR')
+            if grp is not None:
+                body = _pref_rollout(grp, self, "show_edge_highlight",
+                                     "Edge Highlight",
+                                     icon='EDGESEL', split=True)
+                if body is not None:
+                    body.prop(self, "edge_highlight_color")
+                    body.prop(self, "edge_highlight_width")
+
+                body = _pref_rollout(grp, self, "show_face_marking",
+                                     "Face Marking",
+                                     icon='FACE_MAPS', split=True)
+                if body is not None:
+                    body.prop(self, "face_marking_color")
+                    body.prop(self, "face_marking_alpha")
+
+                body = _pref_rollout(grp, self, "show_bbox_display",
+                                     "Bounding Box Display",
+                                     icon='CUBE', split=True)
+                if body is not None:
+                    body.prop(self, "bbox_show_wire")
+                    body.prop(self, "bbox_show_all_edges")
+
+            layout.separator()
+
+            # --- HUD / Help overlay theme (top-level) ---
+            body = _pref_rollout(layout, self, "show_hud_overlay",
+                                 "HUD & Help Overlay", icon='WINDOW')
+            if body is not None:
+                draw_hud_theme_tab(body, self.hud_theme)
 
 def get_preferences():
     """Get addon preferences"""

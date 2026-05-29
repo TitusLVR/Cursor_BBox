@@ -18,7 +18,8 @@ from ..hud_draw import primitives
 from ..hud_draw.state import draw_scope
 from . import text as hud_text
 from .items import HUDItem, HUDSection, ItemState
-from .layout import area_for_region, region_side_insets, DragState, is_inside
+from .layout import (area_for_region, region_side_insets, clamp_to_region,
+                     DragState, is_inside)
 
 
 _STATE_ROLE = {
@@ -354,14 +355,32 @@ class HelpOverlay:
                 slide = int(slide_amount * (1.0 - eased))
 
         insets = region_side_insets(area_for_region(region))
+        bg_pad = theme.hud.bg_padding if theme.hud.bg_enabled else 0
         if corner == "free":
             fx = int(getattr(theme_prefs, "help_free_x", 40))
             fy = int(getattr(theme_prefs, "help_free_y", 40))
-            origin = (fx, fy)
+            origin = clamp_to_region(fx, fy, (w, h), region, bg_pad,
+                                     side_insets=insets)
         else:
-            origin = self._corner_origin(
-                corner, region, (w, h), offx, offy, slide,
-                side_insets=insets)
+            # Clamp the resting position inside the region (accounting for the
+            # bg rect's padding so it can't slip under TOOLS / N-panel), then
+            # re-apply the slide as a delta — clamping a slid origin would kill
+            # the off-edge slide for fade/slide-fade presets.
+            base = self._corner_origin(corner, region, (w, h), offx, offy, 0,
+                                       side_insets=insets)
+            base = clamp_to_region(base[0], base[1], (w, h), region, bg_pad,
+                                   side_insets=insets)
+            if slide:
+                shifted = self._corner_origin(corner, region, (w, h),
+                                              offx, offy, slide,
+                                              side_insets=insets)
+                unshifted = self._corner_origin(corner, region, (w, h),
+                                                offx, offy, 0,
+                                                side_insets=insets)
+                origin = (base[0] + (shifted[0] - unshifted[0]),
+                          base[1] + (shifted[1] - unshifted[1]))
+            else:
+                origin = base
         self._last_origin = origin
         self._last_size = (w, h)
         self._render(theme, origin, (w, h), key_col_w,
@@ -473,14 +492,16 @@ class HelpOverlay:
                 flash_boost: float = 0.0, shock_state=None) -> None:
         x0, y0 = origin
         w, h = size
-        if theme.hud.bg_enabled and w > 0 and h > 0 and alpha > 0.0:
+        if theme.hud.bg_enabled and w > 0 and h > 0:
             pad = theme.hud.bg_padding
-            bgc = theme.hud.bg_color
-            bgc = (bgc[0], bgc[1], bgc[2], bgc[3] * alpha)
+            # Draw the panel at the theme's own alpha — NOT multiplied by the
+            # animation alpha. Folding the fade into the bg makes the panel
+            # colour visibly flicker as text cross-fades; the bg should hold
+            # steady while only the text fades.
             with draw_scope(blend="ALPHA"):
                 primitives.rect_2d(x0 - pad, y0 - pad,
                                    w + 2 * pad, h + 2 * pad,
-                                   color=bgc, theme=theme)
+                                   color=theme.hud.bg_color, theme=theme)
         y = y0 + h
         title_h = theme.text_size("hud_header")
         row_h = max(theme.text_size("hud_key"),

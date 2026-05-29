@@ -10,6 +10,7 @@ import bpy
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty,
                        FloatVectorProperty, IntProperty, StringProperty,
                        PointerProperty)
+from mathutils import Color
 
 
 def _color(default, name=""):
@@ -17,10 +18,50 @@ def _color(default, name=""):
                                min=0.0, max=1.0, default=default)
 
 
+def _to_linear_rgba(src, *, alpha_override=None):
+    """Convert a Blender-theme color (display-space / sRGB) to the
+    scene-linear RGBA our `subtype='COLOR'` props store.
+
+    Theme colors are 3- or 4-component; missing alpha defaults to 1.0.
+    Pass `alpha_override` to force an alpha (e.g. 1.0 for HUD text so a
+    selection-tint source like face_select @ 0.2 stays readable)."""
+    r, g, b = src[0], src[1], src[2]
+    c = Color((r, g, b)).from_srgb_to_scene_linear()
+    a = float(alpha_override) if alpha_override is not None else (
+        float(src[3]) if len(src) > 3 else 1.0)
+    return (c.r, c.g, c.b, a)
+
+
+def apply_blender_theme_hud_colors(t) -> bool:
+    """Copy HUD text + panel colors from the active Blender theme into the
+    addon's HUD theme props. Returns True on success, False if no theme.
+
+    Shared by `CursorBBox_OT_HudUseBlenderColors` and the pristine-install
+    auto-sync in `__init__.register()`.
+    """
+    try:
+        th = bpy.context.preferences.themes[0]
+    except (IndexError, AttributeError):
+        return False
+    ui = th.user_interface
+    v3d = th.view_3d
+    t.color_hud_header         = _to_linear_rgba(ui.panel_title,      alpha_override=1.0)
+    t.color_hud_key            = _to_linear_rgba(v3d.object_active,   alpha_override=1.0)
+    t.color_hud_active_value   = _to_linear_rgba(v3d.editmesh_active, alpha_override=1.0)
+    t.color_hud_label          = _to_linear_rgba(ui.wcol_text.text,   alpha_override=1.0)
+    t.color_hud_label_inactive = _to_linear_rgba(ui.wcol_text.text,   alpha_override=0.5)
+    t.color_hud_stats_error    = _to_linear_rgba(ui.wcol_state.error, alpha_override=1.0)
+    t.panel_bg_color           = _to_linear_rgba(ui.panel_back)
+    return True
+
+
 class CursorBBox_HUD_Theme(bpy.types.PropertyGroup):
     # --- HUD text roles ---
-    color_hud_header:        _color((0.302, 1.000, 0.620, 0.75), "HUD Header / Label Active")
-    color_hud_key:           _color((1.000, 0.872, 0.174, 0.75), "HUD Glyph / Active Value")
+    color_hud_header:        _color((0.302, 1.000, 0.620, 0.75), "HUD Header")
+    color_hud_key:           _color((1.000, 0.872, 0.174, 0.75), "HUD Glyph")
+    # HUD Active Value also drives HUD_LABEL_ACTIVE — both convey the
+    # "currently active item" highlight.
+    color_hud_active_value:  _color((1.000, 0.872, 0.174, 0.75), "HUD Active Value / Label Active")
     color_hud_label:         _color((0.844, 0.844, 0.844, 0.75), "HUD Label")
     color_hud_label_inactive:_color((0.466, 0.473, 0.487, 0.85), "HUD Label Inactive")
     color_hud_stats_error:   _color((1.000, 0.339, 0.382, 0.90), "HUD Stats Error/Warning")
@@ -193,6 +234,22 @@ class CursorBBox_OT_HudThemeResetDefaults(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CursorBBox_OT_HudUseBlenderColors(bpy.types.Operator):
+    bl_idname = "cursor_bbox.theme_use_blender_hud_colors"
+    bl_label = "Use Blender Theme HUD Colors"
+    bl_description = ("Copy HUD text and panel colors from the active Blender "
+                      "theme (converted from display-space to scene-linear)")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        prefs = context.preferences.addons["Cursor_BBox"].preferences
+        if not apply_blender_theme_hud_colors(prefs.hud_theme):
+            self.report({"WARNING"}, "No active Blender theme found")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "HUD colors copied from Blender theme")
+        return {"FINISHED"}
+
+
 def _hud_section(layout, theme, prop_name, title, *, icon="NONE"):
     box = layout.box()
     row = box.row(align=True)
@@ -212,11 +269,16 @@ def draw_hud_theme_tab(layout, theme):
     body = _hud_section(layout, theme, "show_hud_text",
                         "Text Styles", icon="FONT_DATA")
     if body is not None:
+        body.operator("cursor_bbox.theme_use_blender_hud_colors",
+                      icon="COLOR")
+        body.separator()
         for attr, size_attr, label in (
                 ("color_hud_header",         "text_size_hud_header",
-                 "HUD Header / Label Active"),
+                 "HUD Header"),
                 ("color_hud_key",            "text_size_hud_key",
-                 "HUD Glyph / Active Value"),
+                 "HUD Glyph"),
+                ("color_hud_active_value",   None,
+                 "HUD Active Value / Label Active"),
                 ("color_hud_label",          "text_size_hud_label",
                  "HUD Label"),
                 ("color_hud_label_inactive", None,
@@ -255,10 +317,6 @@ def draw_hud_theme_tab(layout, theme):
                         "Font", icon="FILE_FONT")
     if body is not None:
         body.prop(theme, "font_path", text="")
-        body.label(
-            text="Empty = Blender default. Used by every HUD overlay.",
-            icon="INFO",
-        )
 
     layout.separator()
 
@@ -281,16 +339,11 @@ def draw_hud_theme_tab(layout, theme):
         body.prop(theme, "hud_padding")
         body.prop(theme, "hud_key_label_spacing")
         body.prop(theme, "hud_smoothing", slider=True)
-        body.prop(theme, "hud_anim_fps")
-        body.label(text="Toggle: Keymaps → cursor_bbox.ui_hud_params_toggle",
-                   icon="INFO")
 
     # --- Help Overlay ---
     body = _hud_section(layout, theme, "show_help",
                         "Help Overlay", icon="QUESTION")
     if body is not None:
-        body.label(text="Toggle: Keymaps → cursor_bbox.ui_help_toggle",
-                   icon="INFO")
         body.prop(theme, "help_corner")
         row = body.row(align=True)
         if theme.help_corner == "free":
@@ -315,10 +368,13 @@ def draw_hud_theme_tab(layout, theme):
             body.prop(theme, "help_anim_wave_fade_window")
         elif preset == "shockwave":
             body.prop(theme, "help_anim_shockwave_radius")
+        body.separator()
+        body.prop(theme, "hud_anim_fps")
 
     layout.separator()
     row = layout.row()
     row.operator("cursor_bbox.hud_theme_reset_defaults", icon="LOOP_BACK")
 
 
-classes = (CursorBBox_HUD_Theme, CursorBBox_OT_HudThemeResetDefaults)
+classes = (CursorBBox_HUD_Theme, CursorBBox_OT_HudThemeResetDefaults,
+           CursorBBox_OT_HudUseBlenderColors)

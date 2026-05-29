@@ -28,7 +28,8 @@ from .operators.check_convexity import CursorBBox_OT_check_convexity, CursorBBox
 from .ui.panel import CursorBBox_PT_main
 from .ui.pie_menu import CursorBBox_MT_pie_menu
 from .settings.hud_theme import (CursorBBox_HUD_Theme,
-                                 CursorBBox_OT_HudThemeResetDefaults)
+                                 CursorBBox_OT_HudThemeResetDefaults,
+                                 CursorBBox_OT_HudUseBlenderColors)
 from .operators.ui_toggles import (CursorBBox_OT_HelpToggleMarker,
                                    CursorBBox_OT_HudParamsToggleMarker)
 
@@ -155,6 +156,7 @@ classes = [
     CursorBBox_HUD_Theme,
     CursorBBoxPreferences,
     CursorBBox_OT_HudThemeResetDefaults,
+    CursorBBox_OT_HudUseBlenderColors,
     CursorBBox_OT_HelpToggleMarker,
     CursorBBox_OT_HudParamsToggleMarker,
     CursorBBox_OT_set_cursor,
@@ -205,11 +207,33 @@ def unregister_keymap():
             km.keymap_items.remove(kmi)
     addon_keymaps.clear()
 
+def _sync_hud_from_blender_theme_if_pristine():
+    """On a fresh install (no HUD color prop touched by the user), seed the
+    HUD colors from the active Blender theme. `is_property_set()` is True only
+    for props the user has explicitly set, so existing setups are untouched."""
+    try:
+        prefs = bpy.context.preferences.addons[__package__].preferences
+        t = prefs.hud_theme
+    except (KeyError, AttributeError):
+        return
+    watched = ("color_hud_header", "color_hud_key", "color_hud_active_value",
+               "color_hud_label", "color_hud_label_inactive",
+               "color_hud_stats_error", "panel_bg_color")
+    if any(t.is_property_set(p) for p in watched):
+        return
+    try:
+        from .settings.hud_theme import apply_blender_theme_hud_colors
+        apply_blender_theme_hud_colors(t)
+    except Exception as e:
+        print(f"CursorBBox: HUD theme sync skipped: {e}")
+
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     properties.register()
     register_keymap()
+    _sync_hud_from_blender_theme_if_pristine()
 
 def unregister():
     from .functions import async_subprocess
