@@ -95,6 +95,10 @@ Fields:
 - `worst_face: int` — original polygon index of the worst face, or `-1`
 - `boundary_count: int` — package boundary-edge count
 - `nonmanifold_count: int` — package non-manifold-edge count
+- `boundary_edges: set[frozenset[int]]` — vertex-index pairs of boundary edges,
+  for selection (identities, not just the count)
+- `nonmanifold_edges: set[frozenset[int]]` — vertex-index pairs of non-manifold
+  edges, for selection
 
 Algorithm:
 
@@ -111,6 +115,14 @@ Algorithm:
    - `worst_outside, worst_tri = cmg.check_convex(verts, tris)`
    - `boundary_count, nonmanifold_count, _ = cmg.check_watertight(tris)`
    - Map `worst_tri` → original polygon via `face_map`/`orig_index_of`.
+   - Edge identities for selection — build the package's own undirected edge-count
+     dict from the same `tris` (`frozenset((tri[i], tri[j]))` per triangle edge),
+     then `boundary_edges = {edges used exactly once}` and
+     `nonmanifold_edges = {edges used more than twice}`. This mirrors
+     `check_watertight` exactly, so the identities are consistent with the counts
+     by construction. Triangulation does not add vertices, so these vertex
+     indices equal the original mesh's vertex indices; triangulation diagonals are
+     always shared by exactly two triangles, so they never appear here.
 7. Degenerate set: for each triangle, `cmg.triangle_is_degenerate(a, b, c)`;
    collect offending original polygon indices.
 8. Invalid (non-convex) set — per-face selection loop that mirrors
@@ -146,10 +158,11 @@ order as the package call, and negligible for collision-sized meshes.
      edges can be highlighted.
   8. For each bad object, via `bmesh.from_edit_mesh`:
      - Select faces in `invalid_faces | degenerate_faces`.
-     - Select **edges** by bmesh-native flags: boundary = `e.is_boundary`;
-       non-manifold = `len(e.link_faces) > 2`. For triangulated collision meshes
-       these match the package counts exactly; the package counts remain
-       authoritative for the message, native flags drive selection.
+     - Select **edges**: build a lookup from the edit-mesh bmesh of
+       `frozenset((e.verts[0].index, e.verts[1].index)) -> edge`, then select the
+       edges in `boundary_edges | nonmanifold_edges`. These identities come from
+       the package's edge definition (step 6), so selection is consistent with the
+       reported counts — no reliance on bmesh-native edge flags.
      - `bmesh.update_edit_mesh(...)`.
 
 ## Component: `fix_invalid_faces` / `CursorBBox_OT_fix_convexity`
@@ -179,9 +192,23 @@ set of triangle indices) used by both `check_mesh_convexity` and
 - Missing package → clear operator error, no crash (see import shim).
 - Empty/sub-tetrahedral meshes → treated as clean (early-out), as today.
 - Degenerate triangles are excluded from the convex set to avoid double-counting.
-- Edge selection is best-effort: if a mesh is not triangulated and native
-  edit-mesh edge counts diverge from package triangle-edge counts, the package
-  counts are authoritative in the message and selection is best-effort.
+- Edge selection is exact, not best-effort: boundary/non-manifold edge identities
+  come from the package's own edge-count definition (the same one behind the
+  reported counts), mapped back to real mesh edges by vertex-index pair.
+
+## Fidelity
+
+Against the mesh's live geometry, the operator's verdict and selection are 100%
+the package's: `check_convex`, `check_watertight`, and `triangle_is_degenerate`
+are called directly, and the per-face convex loop and edge classification reuse
+the package's exact math and tolerance (`cmg.geo2`, `CONVEXITY_TOLERANCE`, and the
+`check_watertight` edge definition). There is no second algorithm to drift.
+
+The one thing this does not guarantee is bit-equality with
+`collision_mesh_geometry.validate_obj` run on a later-exported OBJ of the same
+mesh: an exporter rounds coordinates and may triangulate n-gons in a different
+pattern, either of which can flip a verdict near the 1e-3 tolerance. That is an
+export artifact and is out of scope for this operator.
 
 ## Testing
 
