@@ -125,6 +125,37 @@ def check_mesh_convexity(mesh_obj):
         bm.free()
 
 
+def _build_convex_hull_bmesh(world_coords):
+    """Return a triangulated convex-hull bmesh from world-space coords.
+
+    Builds the convex hull of the given points, discards interior/unused input
+    points, recomputes outward normals, and triangulates. Does NOT recenter, so
+    a caller writing the result back through an object's inverse matrix keeps the
+    object's origin and transform. Returns the bmesh, or None when there are
+    fewer than 4 points or the hull has no solid faces (coplanar/collinear input).
+    The caller owns (must free) a returned bmesh.
+    """
+    if len(world_coords) < 4:
+        return None
+    bm = bmesh.new()
+    for co in world_coords:
+        bm.verts.new(co)
+    bm.verts.ensure_lookup_table()
+    ret = bmesh.ops.convex_hull(bm, input=bm.verts)
+    interior = set(ret.get('geom_interior', [])) | set(ret.get('geom_unused', []))
+    if interior:
+        bmesh.ops.delete(bm, geom=list(interior), context='VERTS')
+    bm.verts.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    if not bm.faces:
+        bm.free()
+        return None
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    bm.normal_update()
+    return bm
+
+
 def _evaluate_convexity(bm, tolerance):
     """Count convexity-violating triangles for the current bmesh geometry.
 
@@ -144,8 +175,9 @@ def _evaluate_convexity(bm, tolerance):
         eval_bm.free()
 
 
-def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
-    """Fix degenerate and non-convex faces.
+def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
+                      rebuild_hull=True):
+    """Fix degenerate and non-convex collision meshes.
 
     1. Delete degenerate (zero-area) faces and clean up orphaned
        geometry.  Zero-area faces occupy no space so no hole-fill is
@@ -154,9 +186,13 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
        near-duplicate verts that create micro-area faces.
     3. Recalculate normals outward to fix any winding inconsistencies
        that cause false convexity violations.
+    4. If the mesh is still non-convex and *rebuild_hull* is True,
+       rebuild its convex hull in place (triangulated), which guarantees
+       a convex, watertight, manifold result. The object's transform and
+       origin are preserved.
 
     Returns (degenerate_deleted, verts_welded, normals_fixed,
-             remaining_count).
+             remaining_count, hull_rebuilt).
     """
     mesh = mesh_obj.data
     bm = bmesh.new()
@@ -169,7 +205,7 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
         bm.faces.ensure_lookup_table()
 
         if len(bm.verts) < 4 or len(bm.faces) == 0:
-            return 0, 0, 0, 0
+            return 0, 0, 0, 0, False
 
         # --- Pass 1: delete degenerate faces ---
         degen_faces = []
@@ -198,7 +234,7 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
             bm.transform(inv_mat)
             bm.to_mesh(mesh)
             mesh.update()
-            return degen_count, welded, 0, 0
+            return degen_count, welded, 0, 0, False
 
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.normal_update()
@@ -216,11 +252,21 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
 
         normals_fixed = max(0, violations_before - remaining)
 
+        hull_rebuilt = False
+        if rebuild_hull and remaining > 0 and len(bm.verts) >= 4:
+            coords = [v.co.copy() for v in bm.verts]  # world space, post-weld
+            hull_bm = _build_convex_hull_bmesh(coords)
+            if hull_bm is not None:
+                bm.free()
+                bm = hull_bm
+                hull_rebuilt = True
+                _, remaining = _evaluate_convexity(bm, tolerance)
+
         bm.transform(inv_mat)
         bm.to_mesh(mesh)
         mesh.update()
 
-        return degen_count, welded, normals_fixed, remaining
+        return degen_count, welded, normals_fixed, remaining, hull_rebuilt
     finally:
         bm.free()
 
