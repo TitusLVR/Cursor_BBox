@@ -1,65 +1,127 @@
+from collections import namedtuple
+
 import bpy
 import bmesh
 from mathutils import Vector
 
+try:
+    import collision_mesh_geometry as cmg
+    from collision_mesh_geometry import validate_obj
+    from ..functions.convexity_geometry import violating_faces, classify_edges
+    GEOMETRY_AVAILABLE = True
+except ImportError:
+    cmg = None
+    validate_obj = None
+    violating_faces = None
+    classify_edges = None
+    GEOMETRY_AVAILABLE = False
 
-def check_mesh_convexity(mesh_obj, area_threshold=1e-8):
-    """Check whether a mesh object is convex using the centroid-plane test.
+GEOMETRY_IMPORT_ERROR = (
+    "collision_mesh_geometry is not importable - ensure s:\\packages is on PYTHONPATH"
+)
 
-    For a convex mesh, the centroid (average of all vertices) must lie on
-    the inside (or boundary) of every face plane.  If the centroid is on
-    the *outside* of any face plane, the mesh is not convex.
+ConvexityResult = namedtuple(
+    "ConvexityResult",
+    [
+        "is_clean",
+        "total_faces",
+        "invalid_faces",
+        "degenerate_faces",
+        "worst_outside",
+        "worst_face",
+        "boundary_count",
+        "nonmanifold_count",
+        "boundary_edges",
+        "nonmanifold_edges",
+    ],
+)
 
-    Faces with area below *area_threshold* are flagged as degenerate.
 
-    Triangulates internally so non-planar quads/n-gons are handled
-    correctly, then maps invalid triangles back to their original
-    polygon indices.
+def _clean_result(total_faces):
+    return ConvexityResult(
+        True, total_faces, set(), set(), 0.0, -1, 0, 0, set(), set()
+    )
 
-    Returns (is_convex, total_original_faces, invalid_polygon_indices,
-             degenerate_polygon_indices).
+
+def check_mesh_convexity(mesh_obj):
+    """Validate a mesh object against the collision_mesh_geometry policy.
+
+    Triangulates internally, extracts world-space vertices/triangles, and uses
+    the package as the single source of truth: ``check_convex`` for the worst
+    violation, ``check_watertight`` for boundary/non-manifold counts, and
+    ``triangle_is_degenerate`` for zero-area triangles. The pure helpers
+    ``violating_faces`` / ``classify_edges`` provide per-element identities for
+    edit-mode selection. Triangle indices are mapped back to original polygon
+    indices, and edge identities use original vertex indices (triangulation adds
+    no vertices and its diagonals are always interior manifold edges).
+
+    Returns a ``ConvexityResult``.
     """
     mesh = mesh_obj.data
     bm = bmesh.new()
     try:
         bm.from_mesh(mesh)
         bm.transform(mesh_obj.matrix_world)
+        bm.verts.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
 
-        if len(bm.verts) < 4 or len(bm.faces) == 0:
-            return True, len(bm.faces), set(), set()
-
-        centroid = sum((v.co for v in bm.verts), Vector()) / len(bm.verts)
-
-        # Detect degenerate faces before triangulation
-        degenerate_orig = set()
-        for face in bm.faces:
-            if face.calc_area() < area_threshold:
-                degenerate_orig.add(face.index)
+        original_count = len(bm.faces)
+        if len(bm.verts) < 4 or original_count == 0:
+            return _clean_result(original_count)
 
         orig_index_of = {f: f.index for f in bm.faces}
-        original_count = len(bm.faces)
 
-        result = bmesh.ops.triangulate(bm, faces=bm.faces[:])
-        face_map = result['face_map']
+        tri_result = bmesh.ops.triangulate(bm, faces=bm.faces[:])
+        face_map = tri_result['face_map']
+        bm.verts.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        bm.verts.index_update()
 
-        invalid_orig = set()
-        for face in bm.faces:
-            normal = face.normal
-            if normal.length_squared < 1e-12:
-                orig_face = face_map.get(face, face)
-                degenerate_orig.add(orig_index_of[orig_face])
-                continue
-            plane_d = face.verts[0].co.dot(normal)
-            if centroid.dot(normal) > plane_d + 1e-6:
-                orig_face = face_map.get(face, face)
-                invalid_orig.add(orig_index_of[orig_face])
+        verts = [(v.co.x, v.co.y, v.co.z) for v in bm.verts]
+        tris = [[v.index for v in f.verts] for f in bm.faces]
 
-        # Don't double-count: remove degenerates from the convexity set
+        tolerance = validate_obj.CONVEXITY_TOLERANCE
+
+        worst_outside, worst_tri = cmg.check_convex(verts, tris)
+        boundary_count, nonmanifold_count, _ = cmg.check_watertight(tris)
+        boundary_edges, nonmanifold_edges = classify_edges(tris)
+
+        def orig_polygon(tri_index):
+            tri_face = bm.faces[tri_index]
+            source = face_map.get(tri_face, tri_face)
+            return orig_index_of[source]
+
+        worst_face = -1
+        if 0 <= worst_tri < len(bm.faces):
+            worst_face = orig_polygon(worst_tri)
+
+        degenerate_orig = set()
+        for i, tri in enumerate(tris):
+            if cmg.triangle_is_degenerate(verts[tri[0]], verts[tri[1]], verts[tri[2]]):
+                degenerate_orig.add(orig_polygon(i))
+
+        invalid_orig = {orig_polygon(i) for i in violating_faces(verts, tris, tolerance)}
         invalid_orig -= degenerate_orig
 
-        is_clean = len(invalid_orig) == 0 and len(degenerate_orig) == 0
-        return is_clean, original_count, invalid_orig, degenerate_orig
+        is_clean = (
+            not invalid_orig
+            and not degenerate_orig
+            and boundary_count == 0
+            and nonmanifold_count == 0
+        )
+
+        return ConvexityResult(
+            is_clean,
+            original_count,
+            invalid_orig,
+            degenerate_orig,
+            worst_outside,
+            worst_face,
+            boundary_count,
+            nonmanifold_count,
+            boundary_edges,
+            nonmanifold_edges,
+        )
     finally:
         bm.free()
 
