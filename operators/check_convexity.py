@@ -328,6 +328,10 @@ class CursorBBox_OT_check_convexity(bpy.types.Operator):
         )
 
     def execute(self, context):
+        if not GEOMETRY_AVAILABLE:
+            self.report({'ERROR'}, GEOMETRY_IMPORT_ERROR)
+            return {'CANCELLED'}
+
         if context.active_object and context.active_object.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -342,54 +346,69 @@ class CursorBBox_OT_check_convexity(bpy.types.Operator):
         clean_count = 0
 
         for obj in mesh_objects:
-            is_clean, total_faces, invalid, degenerate = check_mesh_convexity(obj)
-            if is_clean:
+            result = check_mesh_convexity(obj)
+            if result.is_clean:
                 clean_count += 1
             else:
-                bad_objects.append((obj, total_faces, invalid, degenerate))
+                bad_objects.append((obj, result))
 
         total = len(mesh_objects)
 
         if not bad_objects:
-            self.report(
-                {'INFO'},
-                f"All {total} selected mesh(es) are convex",
-            )
+            self.report({'INFO'}, f"All {total} selected mesh(es) are convex")
             return {'FINISHED'}
 
-        for obj, total_faces, invalid, degenerate in bad_objects:
+        for obj, result in bad_objects:
             parts = []
-            if invalid:
-                parts.append(f"{len(invalid)} non-convex")
-            if degenerate:
-                parts.append(f"{len(degenerate)} degenerate")
+            if result.invalid_faces:
+                detail = f"{len(result.invalid_faces)} non-convex"
+                if result.worst_face >= 0:
+                    detail += (
+                        f" (worst {result.worst_outside:.4f}m"
+                        f" @ face {result.worst_face})"
+                    )
+                parts.append(detail)
+            if result.degenerate_faces:
+                parts.append(f"{len(result.degenerate_faces)} degenerate")
+            if result.boundary_count:
+                parts.append(f"{result.boundary_count} boundary")
+            if result.nonmanifold_count:
+                parts.append(f"{result.nonmanifold_count} non-manifold")
             self.report(
                 {'WARNING'},
-                f"\"{obj.name}\": {' + '.join(parts)}"
-                f" / {total_faces} faces",
+                f"\"{obj.name}\": {' + '.join(parts)} / {result.total_faces} faces",
             )
+
         self.report(
             {'WARNING'},
-            f"{len(bad_objects)}/{total} mesh(es) have issues"
-            f" ({clean_count} clean)",
+            f"{len(bad_objects)}/{total} mesh(es) have issues ({clean_count} clean)",
         )
 
         bpy.ops.object.select_all(action='DESELECT')
-        for obj, _, _, _ in bad_objects:
+        for obj, _ in bad_objects:
             obj.select_set(True)
         context.view_layer.objects.active = bad_objects[0][0]
 
         bpy.ops.object.mode_set(mode='EDIT')
-        context.tool_settings.mesh_select_mode = (False, False, True)
+        context.tool_settings.mesh_select_mode = (False, True, True)
         bpy.ops.mesh.select_all(action='DESELECT')
 
-        for obj, _, invalid, degenerate in bad_objects:
-            all_bad = invalid | degenerate
+        for obj, result in bad_objects:
             bm = bmesh.from_edit_mesh(obj.data)
+            bm.verts.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
-            for idx in all_bad:
+
+            for idx in (result.invalid_faces | result.degenerate_faces):
                 if idx < len(bm.faces):
                     bm.faces[idx].select = True
+
+            wanted_edges = result.boundary_edges | result.nonmanifold_edges
+            if wanted_edges:
+                for edge in bm.edges:
+                    key = frozenset((edge.verts[0].index, edge.verts[1].index))
+                    if key in wanted_edges:
+                        edge.select = True
+
             bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
 
         return {'FINISHED'}
