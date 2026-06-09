@@ -1755,8 +1755,39 @@ def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, c
                 face_normal = (mat_3x3 @ face.normal).normalized()
                 for v in world_verts:
                     all_vertices.append(v + face_normal * face_thickness)
-    
+
     return all_vertices
+
+
+def build_all_faces_dict(objects, use_depsgraph=False, context=None):
+    """Build a marked-faces dict containing every polygon of every mesh object.
+
+    Returns a dict mapping each mesh object to a set of all its polygon
+    indices, mirroring the structure of an operator's ``marked_faces`` so it
+    plugs straight into the existing fit/build pipeline. Non-mesh objects and
+    objects with no polygons are skipped.
+
+    Args:
+        objects: Iterable of Blender objects (e.g. selected objects).
+        use_depsgraph: Whether to use depsgraph-evaluated meshes (matches the
+            operator's current toggle so indices align with marked visuals).
+        context: Blender context (optional, uses bpy.context if not provided).
+
+    Returns:
+        dict: {object: set(polygon indices)}
+    """
+    if context is None:
+        context = bpy.context
+
+    result = {}
+    for obj in objects:
+        if obj is None or obj.type != 'MESH':
+            continue
+        mesh, _ = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+        count = len(mesh.polygons)
+        if count:
+            result[obj] = set(range(count))
+    return result
 
 # ===== SELECTION STATE MANAGEMENT =====
 

@@ -27,6 +27,7 @@ from ..functions.utils import (
     cleanup_collection_instance_temp,
     compute_thickness_selection_to_cursor,
     get_evaluated_mesh,
+    build_all_faces_dict,
 )
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
@@ -491,6 +492,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
         self.hud_ctl = HUDController("interactive_hull", "Interactive Hull")
         self.hud_ctl.help.add_section(HUDSection("Object Mode", [
             HUDItem("Mark / unmark face", "LMB"),
+            HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create hull", "SPACE"),
             HUDItem("Hull per object", "G"),
             HUDItem("Hull per island", "L"),
@@ -612,6 +614,25 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
                     self.report({'INFO'}, "Undo")
                 else:
                     self.report({'INFO'}, "Nothing to undo")
+            return {'RUNNING_MODAL'}
+
+        # Mark all polygons of all selected objects (Ctrl+A)
+        if (event.type == 'A' and event.value == 'PRESS'
+                and event.ctrl and not self.point_mode):
+            self._push_undo()
+            self.marked_faces = build_all_faces_dict(
+                self.original_selected_objects, use_depsgraph=self.use_depsgraph)
+            clear_all_markings()
+            for obj, faces in self.marked_faces.items():
+                if faces:
+                    mark_faces_batch(obj, faces, use_depsgraph=self.use_depsgraph)
+            update_marked_faces_convex_hull(
+                self.marked_faces, self.push_value,
+                marked_points=self.marked_points, use_depsgraph=self.use_depsgraph,
+                face_thickness=self._get_preview_thickness())
+            total = sum(len(v) for v in self.marked_faces.values())
+            self.report({'INFO'}, f"Marked all polygons ({total}) of selected objects")
+            context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
         # Snap mode 1=Vertex, 2=Edge, 3=Face (point mode only)
@@ -1099,7 +1120,7 @@ class CursorBBox_OT_interactive_hull(bpy.types.Operator):
             return {'RUNNING_MODAL'}
             
         # Add Point Mode Toggle (A)
-        elif event.type == 'A' and event.value == 'PRESS':
+        elif event.type == 'A' and event.value == 'PRESS' and not event.ctrl:
             self.point_mode = not self.point_mode
             if self.point_mode:
                 self.report({'INFO'}, "Entered Add Point Mode")

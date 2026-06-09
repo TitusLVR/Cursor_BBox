@@ -23,7 +23,8 @@ from ..functions.utils import (
     get_faces_to_process,
     is_collection_instance,
     make_collection_instance_real,
-    cleanup_collection_instance_temp
+    cleanup_collection_instance_temp,
+    build_all_faces_dict
 )
 from ..functions.core import (
     cursor_aligned_bounding_box,
@@ -297,6 +298,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         # Help overlay — corner-anchored hotkey legend.
         self.hud_ctl.help.add_section(HUDSection("Object Mode", [
             HUDItem("Mark / unmark face", "LMB"),
+            HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create bounding box", "SPACE"),
             HUDItem("Enter point mode", "A"),
             HUDItem("Toggle coplanar selection", "C"),
@@ -392,6 +394,27 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                     self.report({'INFO'}, "Undo")
                 else:
                     self.report({'INFO'}, "Nothing to undo")
+            return {'RUNNING_MODAL'}
+
+        # Mark all polygons of all selected objects (Ctrl+A)
+        if (event.type == 'A' and event.value == 'PRESS'
+                and event.ctrl and not self.point_mode):
+            self._push_undo()
+            self.marked_faces = build_all_faces_dict(
+                self.original_selected_objects, use_depsgraph=self.use_depsgraph)
+            clear_all_markings()
+            for obj, faces in self.marked_faces.items():
+                if faces:
+                    mark_faces_batch(obj, faces, use_depsgraph=self.use_depsgraph)
+            cursor_rotation = get_cursor_rotation_euler(context)
+            update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                     context.scene.cursor.location,
+                                     cursor_rotation,
+                                     marked_points=self.marked_points,
+                                     use_depsgraph=self.use_depsgraph)
+            total = sum(len(v) for v in self.marked_faces.values())
+            self.report({'INFO'}, f"Marked all polygons ({total}) of selected objects")
+            context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
         # Cancel (Esc)
@@ -807,12 +830,12 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             
             return {'RUNNING_MODAL'}
         
-        elif event.type == 'A' and event.value == 'PRESS':
+        elif event.type == 'A' and event.value == 'PRESS' and not event.ctrl:
             self.point_mode = not self.point_mode
             if self.point_mode:
                 self.report({'INFO'}, "Entered Add Point Mode")
-                self.current_face_data = None 
-                clear_preview_faces() 
+                self.current_face_data = None
+                clear_preview_faces()
             else:
                 self.report({'INFO'}, "Exited Add Point Mode")
                 clear_preview_point()
