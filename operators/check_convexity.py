@@ -2,7 +2,6 @@ from collections import namedtuple
 
 import bpy
 import bmesh
-from mathutils import Vector
 
 try:
     import collision_mesh_geometry as cmg
@@ -126,6 +125,25 @@ def check_mesh_convexity(mesh_obj):
         bm.free()
 
 
+def _evaluate_convexity(bm, tolerance):
+    """Count convexity-violating triangles for the current bmesh geometry.
+
+    Triangulates a throwaway copy (so the live bmesh is untouched) and runs the
+    same per-vertex convex test used by ``check_mesh_convexity``. Returns
+    ``(triangle_count, violating_count)``.
+    """
+    eval_bm = bm.copy()
+    try:
+        bmesh.ops.triangulate(eval_bm, faces=eval_bm.faces[:])
+        eval_bm.verts.ensure_lookup_table()
+        eval_bm.verts.index_update()
+        verts = [(v.co.x, v.co.y, v.co.z) for v in eval_bm.verts]
+        tris = [[v.index for v in f.verts] for f in eval_bm.faces]
+        return len(tris), len(violating_faces(verts, tris, tolerance))
+    finally:
+        eval_bm.free()
+
+
 def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
     """Fix degenerate and non-convex faces.
 
@@ -185,35 +203,18 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0):
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.normal_update()
 
-        centroid = sum((v.co for v in bm.verts), Vector()) / len(bm.verts)
+        tolerance = validate_obj.CONVEXITY_TOLERANCE
+        tri_count, violations_before = _evaluate_convexity(bm, tolerance)
+        remaining = violations_before
 
-        # Check if majority of normals point away from centroid;
-        # if not, the recalc picked the wrong direction -- flip all.
-        inward = sum(
-            1 for f in bm.faces
-            if f.normal.length_squared > 1e-12
-            and centroid.dot(f.normal.normalized())
-            > f.verts[0].co.dot(f.normal.normalized()) + 1e-6
-        )
-        outward = len(bm.faces) - inward
-        if inward > outward:
+        # If most faces report violations, recalc picked inward winding; flip all
+        # and re-evaluate with the same package test.
+        if violations_before * 2 > tri_count:
             bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
             bm.normal_update()
+            _, remaining = _evaluate_convexity(bm, tolerance)
 
-        normals_fixed = 0
-        remaining = 0
-        for face in bm.faces:
-            normal = face.normal
-            if normal.length_squared < 1e-12:
-                remaining += 1
-                continue
-            n = normal.normalized()
-            plane_d = face.verts[0].co.dot(n)
-            if centroid.dot(n) > plane_d + 1e-6:
-                remaining += 1
-
-        if degen_count > 0 or welded > 0 or remaining < inward:
-            normals_fixed = max(0, inward - remaining)
+        normals_fixed = max(0, violations_before - remaining)
 
         bm.transform(inv_mat)
         bm.to_mesh(mesh)
@@ -262,6 +263,10 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
         )
 
     def execute(self, context):
+        if not GEOMETRY_AVAILABLE:
+            self.report({'ERROR'}, GEOMETRY_IMPORT_ERROR)
+            return {'CANCELLED'}
+
         if context.active_object and context.active_object.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
