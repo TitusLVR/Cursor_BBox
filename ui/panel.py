@@ -252,7 +252,9 @@ class CursorBBox_PT_main(bpy.types.Panel):
         row.alignment = 'LEFT'
         row.label(text="Naming & Collection", icon='OUTLINER_COLLECTION')
         
-        col.prop(scene, 'cursor_bbox_collection_name', text="Collection")
+        row = col.row(align=True)
+        row.prop(scene, 'cursor_bbox_collection_name', text="Collection")
+        row.operator("cursor_bbox.use_active_collection", text="", icon='EYEDROPPER')
         col.prop(scene, 'cursor_bbox_name_box', text="Bounding Box")
         col.prop(scene, 'cursor_bbox_name_sphere', text="Bounding Sphere")
         col.prop(scene, 'cursor_bbox_name_hull', text="Convex Hull")
