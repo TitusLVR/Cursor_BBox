@@ -276,10 +276,19 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
     bl_idname = "cursor_bbox.fix_convexity"
     bl_label = "Fix Convexity"
     bl_description = (
-        "Delete zero-area faces, weld nearby vertices, and "
-        "recalculate normals outward"
+        "Delete zero-area faces, weld nearby vertices, recalculate normals, "
+        "and rebuild the convex hull in place when a mesh stays non-convex"
     )
     bl_options = {'REGISTER', 'UNDO'}
+
+    rebuild_hull: bpy.props.BoolProperty(
+        name="Rebuild Hull",
+        description=(
+            "When gentle repairs can't make a mesh convex, rebuild its convex "
+            "hull in place (replaces the mesh topology)"
+        ),
+        default=True,
+    )
 
     area_threshold: bpy.props.FloatProperty(
         name="Area Threshold",
@@ -327,20 +336,26 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
         total_welded = 0
         total_normals = 0
         total_remaining = 0
+        total_hull = 0
         touched_objects = 0
+        concave_objects = 0
 
         for obj in mesh_objects:
-            degen, welded, normals, remaining = fix_invalid_faces(
-                obj, self.area_threshold, self.weld_distance,
+            degen, welded, normals, remaining, rebuilt = fix_invalid_faces(
+                obj, self.area_threshold, self.weld_distance, self.rebuild_hull,
             )
-            if degen + welded + normals > 0:
+            if degen + welded + normals + (1 if rebuilt else 0) > 0:
                 touched_objects += 1
-                total_degen += degen
-                total_welded += welded
-                total_normals += normals
-                total_remaining += remaining
+            total_degen += degen
+            total_welded += welded
+            total_normals += normals
+            total_hull += 1 if rebuilt else 0
+            total_remaining += remaining
+            if remaining > 0:
+                concave_objects += 1
 
-        if total_degen + total_welded + total_normals == 0:
+        did_work = total_degen + total_welded + total_normals + total_hull
+        if did_work == 0 and total_remaining == 0:
             self.report({'INFO'}, "All meshes are already clean")
             return {'FINISHED'}
 
@@ -351,10 +366,21 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
             parts.append(f"{total_welded} verts welded")
         if total_normals:
             parts.append(f"{total_normals} normals fixed")
-        msg = f"{', '.join(parts)} on {touched_objects} object(s)"
+        if total_hull:
+            parts.append(f"{total_hull} hull-rebuilt")
+
+        if parts:
+            msg = f"{', '.join(parts)} on {touched_objects} object(s)"
+        else:
+            msg = "No repairs applied"
 
         if total_remaining:
-            msg += f" — {total_remaining} genuine concavities remain"
+            msg += (
+                f" — {total_remaining} concavities remain on "
+                f"{concave_objects} object(s)"
+            )
+            if not self.rebuild_hull:
+                msg += "; enable Rebuild Hull to fix"
             self.report({'WARNING'}, msg)
         else:
             self.report({'INFO'}, msg)
