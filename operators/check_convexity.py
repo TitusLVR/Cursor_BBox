@@ -1,19 +1,38 @@
+import os
+import sys
 from collections import namedtuple
 
 import bpy
 import bmesh
 
-try:
+# collision_mesh_geometry ships in s:\packages, which is not always on
+# PYTHONPATH (e.g. a fresh Blender launch). If the first import fails, add that
+# directory and retry once before giving up.
+_PACKAGES_FALLBACK = r"s:\packages"
+
+
+def _import_geometry():
     import collision_mesh_geometry as cmg
     from collision_mesh_geometry import validate_obj
     from ..functions.convexity_geometry import violating_faces, classify_edges
+    return cmg, validate_obj, violating_faces, classify_edges
+
+
+try:
+    cmg, validate_obj, violating_faces, classify_edges = _import_geometry()
     GEOMETRY_AVAILABLE = True
 except ImportError:
-    cmg = None
-    validate_obj = None
-    violating_faces = None
-    classify_edges = None
-    GEOMETRY_AVAILABLE = False
+    if os.path.isdir(_PACKAGES_FALLBACK) and _PACKAGES_FALLBACK not in sys.path:
+        sys.path.append(_PACKAGES_FALLBACK)
+    try:
+        cmg, validate_obj, violating_faces, classify_edges = _import_geometry()
+        GEOMETRY_AVAILABLE = True
+    except ImportError:
+        cmg = None
+        validate_obj = None
+        violating_faces = None
+        classify_edges = None
+        GEOMETRY_AVAILABLE = False
 
 GEOMETRY_IMPORT_ERROR = (
     "collision_mesh_geometry is not importable - ensure s:\\packages is on PYTHONPATH"
