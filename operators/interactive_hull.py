@@ -69,6 +69,33 @@ from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
 from ..functions.undo_stack import OperatorUndoStack
 
 
+def _reconvex_in_place(bm):
+    """Rebuild the convex hull of *bm*'s current vertices in place.
+
+    Used after ``dissolve_limit``: dissolving near-coplanar faces of a hull
+    merges them into non-planar n-gons that bend outward at convex edges, which
+    read as concavity to the collision/convexity checks. Re-hulling the reduced
+    vertex set restores a truly convex, triangulated mesh while keeping the
+    vertex reduction the dissolve gave us. Clears and rebuilds the same bmesh so
+    callers keep their reference. No-op for fewer than 4 verts.
+    """
+    coords = [v.co.copy() for v in bm.verts]
+    if len(coords) < 4:
+        return
+    bm.clear()
+    for co in coords:
+        bm.verts.new(co)
+    bm.verts.ensure_lookup_table()
+    ret = bmesh.ops.convex_hull(bm, input=bm.verts)
+    geom_to_remove = list(set(ret.get('geom_interior', []) + ret.get('geom_unused', [])))
+    if geom_to_remove:
+        bmesh.ops.delete(bm, geom=geom_to_remove, context='VERTS')
+    bm.verts.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
+    bm.faces.ensure_lookup_table()
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+
 def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False, face_thickness=0.0):
     """Create a convex hull from marked faces and points. face_thickness offsets face vertices along normals (extrusion-like)."""
     from ..functions.utils import collect_vertices_from_marked_faces
@@ -141,7 +168,13 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
             
             # Recalculate normals after dissolve
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-        
+
+            # Re-convex: dissolve can merge faces into non-planar n-gons that
+            # bend outward at convex edges. Re-hull the reduced vertex set so the
+            # result stays truly convex while keeping the dissolve's simplification.
+            if context.scene.cursor_bbox_hull_reconvex:
+                _reconvex_in_place(bm)
+
         # Triangulate the final mesh if enabled
         if context.scene.cursor_bbox_hull_use_triangulate:
             bmesh.ops.triangulate(
@@ -241,6 +274,10 @@ def _build_hull_object_from_vertices(context, world_vertices, name):
             bm.edges.ensure_lookup_table()
             bm.faces.ensure_lookup_table()
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+            # Re-hull the reduced vertex set so a higher dissolve angle can't
+            # leave non-planar n-gons that read as concavity (see _reconvex_in_place).
+            if context.scene.cursor_bbox_hull_reconvex:
+                _reconvex_in_place(bm)
         if context.scene.cursor_bbox_hull_use_triangulate:
             bmesh.ops.triangulate(
                 bm, faces=bm.faces,

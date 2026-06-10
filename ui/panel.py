@@ -267,6 +267,11 @@ class CursorBBox_PT_main(bpy.types.Panel):
         row.label(text="Hull Options", icon='MESH_ICOSPHERE')
         
         col.prop(scene, 'cursor_bbox_hull_dissolve_angle', text="Dissolve Angle")
+
+        # Re-Convex only does something when faces are actually dissolved.
+        if scene.cursor_bbox_hull_dissolve_angle > 0:
+            col.prop(scene, 'cursor_bbox_hull_reconvex', text="Re-Convex After Dissolve", toggle=True)
+
         col.prop(scene, 'cursor_bbox_hull_use_triangulate', text="Triangulate", toggle=True)
         
         # Show triangulation method options only if triangulation is enabled

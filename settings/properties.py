@@ -422,6 +422,16 @@ def register():
         precision=1
     )
 
+    bpy.types.Scene.cursor_bbox_hull_reconvex = bpy.props.BoolProperty(
+        name="Re-Convex After Dissolve",
+        description=(
+            "After dissolving planar faces, rebuild the convex hull from the "
+            "reduced vertex set so the result stays truly convex. Only applies "
+            "when Dissolve Angle is greater than 0"
+        ),
+        default=True
+    )
+
     bpy.types.Scene.cursor_bbox_hull_use_triangulate = bpy.props.BoolProperty(
         name="Triangulate Hull",
         description="Triangulate the final convex hull mesh",
@@ -506,6 +516,7 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_fix_area_threshold
     del bpy.types.Scene.cursor_bbox_fix_weld_distance
     del bpy.types.Scene.cursor_bbox_hull_dissolve_angle
+    del bpy.types.Scene.cursor_bbox_hull_reconvex
     del bpy.types.Scene.cursor_bbox_hull_use_triangulate
     del bpy.types.Scene.cursor_bbox_hull_triangulate_quads
     del bpy.types.Scene.cursor_bbox_hull_triangulate_ngons
