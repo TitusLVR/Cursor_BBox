@@ -1707,54 +1707,94 @@ def compute_thickness_selection_to_cursor(marked_faces_dict, cursor_location, us
     return (Vector(cursor_location) - avg_center).dot(avg_normal)
 
 
-def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, context=None, face_thickness=0.0):
+def collect_vertices_from_marked_faces(marked_faces_dict, use_depsgraph=False, context=None, face_thickness=0.0, push_value=0.0):
     """
     Collect all world-space vertices from marked faces dictionary.
-    
-    When face_thickness is non-zero, also adds vertices offset along each face's
-    normal (extrusion-like), so the convex hull can wrap both original and
-    thickened faces. This is separate from push offset (which scales the final hull).
-    
+
+    Both push_value and face_thickness are applied *virtually*: they offset the
+    collected world-space coordinates in the returned list along each face's
+    normal. The source meshes are never modified. Because the convex hull of any
+    point set is convex, offsetting these points before hulling (rather than
+    moving hull vertices afterward) keeps the resulting hull exactly convex for
+    any push/thickness value, positive or negative.
+
+    push_value shifts the collected verts along the face normal (inflate/deflate
+    the whole hull). face_thickness additionally appends a second "shell" layer
+    offset from the base, so the hull wraps both layers (extrusion-like).
+
     Args:
         marked_faces_dict: Dictionary mapping objects to sets of face indices
         use_depsgraph: Whether to use depsgraph evaluation
         context: Blender context (optional, uses bpy.context if not provided)
-        face_thickness: Offset along face normals; can be positive (outward) or negative (inward). 0 = no extra points.
-        
+        face_thickness: Shell offset along face normals; positive (outward) or negative (inward). 0 = no extra layer.
+        push_value: Inflate/deflate offset along face normals applied to the base verts. 0 = no offset.
+
     Returns:
         list: List of Vector objects representing world-space vertex positions
     """
     if context is None:
         context = bpy.context
-    
+
     all_vertices = []
-    
+
     if not marked_faces_dict:
         return all_vertices
-    
+
     use_thickness = abs(face_thickness) > 1e-6
-    
+    use_push = abs(push_value) > 1e-6
+
     for obj, face_indices in marked_faces_dict.items():
         if not face_indices or obj.type != 'MESH':
             continue
-        
+
         mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
         mat_3x3 = obj_matrix_world.to_3x3()
-        
-        # Collect vertices from all marked faces
-        for face_idx in face_indices:
-            if face_idx >= len(mesh.polygons):
-                continue
-            
-            face = mesh.polygons[face_idx]
-            world_verts = [obj_matrix_world @ mesh.vertices[vert_idx].co for vert_idx in face.vertices]
-            all_vertices.extend(world_verts)
-            
-            if use_thickness:
-                # Face normal in world space (no translation)
+
+        if use_push:
+            # Virtual inflate/deflate. Accumulate a per-vertex normal across the
+            # marked faces and offset each shared vertex ONCE along it. Offsetting
+            # per-face instead would duplicate a shared vertex to several spots,
+            # producing a stepped hull that dissolve_limit later turns into
+            # non-planar n-gons (flagged by the convexity check). A coherent
+            # per-vertex offset keeps dissolve's merged faces near-planar.
+            vert_normals = {}
+            vert_world = {}
+            for face_idx in face_indices:
+                if face_idx >= len(mesh.polygons):
+                    continue
+                face = mesh.polygons[face_idx]
                 face_normal = (mat_3x3 @ face.normal).normalized()
-                for v in world_verts:
-                    all_vertices.append(v + face_normal * face_thickness)
+                for vert_idx in face.vertices:
+                    if vert_idx not in vert_world:
+                        vert_world[vert_idx] = obj_matrix_world @ mesh.vertices[vert_idx].co
+                        vert_normals[vert_idx] = Vector((0.0, 0.0, 0.0))
+                    vert_normals[vert_idx] += face_normal
+            for vert_idx, normal_sum in vert_normals.items():
+                normal = normal_sum.normalized() if normal_sum.length_squared > 0 else Vector((0.0, 0.0, 0.0))
+                all_vertices.append(vert_world[vert_idx] + normal * push_value)
+        else:
+            # Base verts, collected per face (duplicate shared verts are
+            # identical, so they collapse harmlessly in the hull).
+            for face_idx in face_indices:
+                if face_idx >= len(mesh.polygons):
+                    continue
+                face = mesh.polygons[face_idx]
+                all_vertices.extend(
+                    obj_matrix_world @ mesh.vertices[vert_idx].co for vert_idx in face.vertices
+                )
+
+        if use_thickness:
+            # Shell layer (extrusion-like), offset per face relative to the
+            # (possibly pushed) base so the hull wraps both layers.
+            shell_offset = push_value + face_thickness
+            for face_idx in face_indices:
+                if face_idx >= len(mesh.polygons):
+                    continue
+                face = mesh.polygons[face_idx]
+                face_normal = (mat_3x3 @ face.normal).normalized()
+                for vert_idx in face.vertices:
+                    world_co = obj_matrix_world @ mesh.vertices[vert_idx].co
+                    all_vertices.append(world_co + face_normal * shell_offset)
 
     return all_vertices
 

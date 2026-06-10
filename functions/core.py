@@ -521,7 +521,8 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
     try:
         # Collect vertices from marked faces using shared utility (with optional thickness offset)
         all_vertices = collect_vertices_from_marked_faces(
-            marked_faces_dict, use_depsgraph=use_depsgraph, face_thickness=face_thickness
+            marked_faces_dict, use_depsgraph=use_depsgraph,
+            face_thickness=face_thickness, push_value=push_value,
         )
 
         # Add marked points
@@ -586,17 +587,8 @@ def update_marked_faces_convex_hull(marked_faces_dict, push_value, marked_points
             # Recalculate normals after dissolve
             bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
-        # Apply push value (inflate)
-        if abs(push_value) > 0.0001:
-            vert_normals = {v: Vector((0,0,0)) for v in bm.verts}
-            for f in bm.faces:
-                for v in f.verts:
-                    vert_normals[v] += f.normal
-            
-            for v in bm.verts:
-                if vert_normals[v].length_squared > 0:
-                    normal = vert_normals[v].normalized()
-                    v.co += normal * push_value
+        # Push is applied virtually pre-hull (see collect_vertices_from_marked_faces),
+        # so the preview already reflects the inflated/deflated convex hull.
 
         # Prepare for drawing - triangulate faces properly
         face_verts = []

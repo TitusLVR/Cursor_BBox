@@ -81,7 +81,8 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
     
     # Collect vertices from marked faces using shared utility (with optional thickness offset)
     all_vertices = collect_vertices_from_marked_faces(
-        marked_faces_dict, use_depsgraph=use_depsgraph, context=context, face_thickness=face_thickness
+        marked_faces_dict, use_depsgraph=use_depsgraph, context=context,
+        face_thickness=face_thickness, push_value=push_value,
     )
     
     # Add marked points
@@ -150,20 +151,9 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
                 ngon_method=context.scene.cursor_bbox_hull_triangulate_ngons
             )
         
-        # Apply Push Value (Inflate along normals)
-        if abs(push_value) > 0.0001:
-            # Simple vertex normal calculation
-            vert_normals = {v: Vector((0,0,0)) for v in bm.verts}
-            for f in bm.faces:
-                for v in f.verts:
-                    vert_normals[v] += f.normal
-            
-            # Normalize and move
-            for v in bm.verts:
-                if vert_normals[v].length_squared > 0:
-                    normal = vert_normals[v].normalized()
-                    v.co += normal * push_value
-        
+        # Push is applied virtually pre-hull (see collect_vertices_from_marked_faces),
+        # so the hull is already inflated/deflated and stays exactly convex.
+
         # Calculate Center (Centroid/Geometry Center) explicitly
         if len(bm.verts) > 0:
             center_of_geometry = Vector((0.0, 0.0, 0.0))
@@ -216,13 +206,14 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         return False
 
 
-def _build_hull_object_from_vertices(context, world_vertices, name, push_value=0.0):
+def _build_hull_object_from_vertices(context, world_vertices, name):
     """Build a convex hull mesh object from world-space vertex coordinates.
 
     Applies the same scene settings as the rest of the hull tools
-    (dissolve_limit, triangulate, push) and centers the geometry on its
-    centroid. Returns the new object, or None if no hull geometry results
-    (e.g. fewer than 4 non-coplanar vertices).
+    (dissolve_limit, triangulate) and centers the geometry on its centroid.
+    Returns the new object, or None if no hull geometry results (e.g. fewer
+    than 4 non-coplanar vertices). Any push offset is expected to be applied
+    virtually to *world_vertices* before this call so the hull stays convex.
     """
     if not world_vertices:
         return None
@@ -260,14 +251,6 @@ def _build_hull_object_from_vertices(context, world_vertices, name, push_value=0
         if not bm.faces:
             bm.free()
             return None
-        if abs(push_value) > 0.0001:
-            vert_normals = {v: Vector((0, 0, 0)) for v in bm.verts}
-            for f in bm.faces:
-                for v in f.verts:
-                    vert_normals[v] += f.normal
-            for v in bm.verts:
-                if vert_normals[v].length_squared > 0:
-                    v.co += vert_normals[v].normalized() * push_value
         if len(bm.verts) > 0:
             center_of_geometry = sum((v.co for v in bm.verts), Vector((0, 0, 0))) / len(bm.verts)
             bmesh.ops.translate(bm, verts=bm.verts, vec=-center_of_geometry)
@@ -293,26 +276,39 @@ def create_convex_hull_from_object(obj, push_value=0.0, use_depsgraph=False):
         return None
     context = bpy.context
     mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
-    all_vertices = [obj_matrix_world @ mesh.vertices[i].co for i in range(len(mesh.vertices))]
+    mat_3x3 = obj_matrix_world.to_3x3()
+    use_push = abs(push_value) > 1e-6
+    all_vertices = []
+    for v in mesh.vertices:
+        # Virtual push: offset along the source vertex normal before hulling.
+        co = obj_matrix_world @ v.co
+        if use_push:
+            co = co + (mat_3x3 @ v.normal).normalized() * push_value
+        all_vertices.append(co)
     base_name = context.scene.cursor_bbox_name_hull or "Convex"
     name = f"{base_name}_{obj.name}" if obj.name else base_name
-    return _build_hull_object_from_vertices(context, all_vertices, name, push_value)
+    return _build_hull_object_from_vertices(context, all_vertices, name)
 
 
-def split_mesh_into_islands(obj, use_depsgraph=False):
+def split_mesh_into_islands(obj, use_depsgraph=False, push_value=0.0):
     """Split a mesh object into connected components (loose parts).
 
     Returns a list of world-space vertex-coordinate lists, one per island.
     Vertices are grouped by connectivity through edges; isolated vertices
-    (no edges) each form their own single-vertex island.
+    (no edges) each form their own single-vertex island. When push_value is
+    non-zero, each coordinate is offset virtually along its vertex normal so a
+    later hull stays exactly convex.
     """
     if obj.type != 'MESH':
         return []
     context = bpy.context
     mesh, obj_matrix_world = get_evaluated_mesh(obj, use_depsgraph=use_depsgraph, context=context)
+    mat_3x3 = obj_matrix_world.to_3x3()
+    use_push = abs(push_value) > 1e-6
     bm = bmesh.new()
     try:
         bm.from_mesh(mesh)
+        bm.normal_update()
         bm.verts.ensure_lookup_table()
         islands = []
         visited = set()
@@ -325,7 +321,10 @@ def split_mesh_into_islands(obj, use_depsgraph=False):
             component = []
             while stack:
                 v = stack.pop()
-                component.append(obj_matrix_world @ v.co.copy())
+                co = obj_matrix_world @ v.co.copy()
+                if use_push:
+                    co = co + (mat_3x3 @ v.normal).normalized() * push_value
+                component.append(co)
                 for e in v.link_edges:
                     other = e.other_vert(v)
                     if other.index not in visited:
@@ -346,12 +345,12 @@ def create_convex_hulls_from_object_islands(obj, push_value=0.0, use_depsgraph=F
     if obj.type != 'MESH' or not obj.data.vertices:
         return []
     context = bpy.context
-    islands = split_mesh_into_islands(obj, use_depsgraph=use_depsgraph)
+    islands = split_mesh_into_islands(obj, use_depsgraph=use_depsgraph, push_value=push_value)
     base_name = context.scene.cursor_bbox_name_hull or "Convex"
     created = []
     for i, verts in enumerate(islands):
         name = f"{base_name}_{obj.name}_{i}" if obj.name else f"{base_name}_{i}"
-        new_obj = _build_hull_object_from_vertices(context, verts, name, push_value)
+        new_obj = _build_hull_object_from_vertices(context, verts, name)
         if new_obj:
             created.append(new_obj)
     return created
