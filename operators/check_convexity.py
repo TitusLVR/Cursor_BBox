@@ -14,24 +14,29 @@ _PACKAGES_FALLBACK = r"s:\packages"
 def _import_geometry():
     import collision_mesh_geometry as cmg
     from collision_mesh_geometry import validate_obj
-    from ..functions.convexity_geometry import violating_faces, classify_edges
-    return cmg, validate_obj, violating_faces, classify_edges
+    from ..functions.convexity_geometry import (
+        violating_faces, classify_edges, convex_hull_triangles,
+    )
+    return cmg, validate_obj, violating_faces, classify_edges, convex_hull_triangles
 
 
 try:
-    cmg, validate_obj, violating_faces, classify_edges = _import_geometry()
+    (cmg, validate_obj, violating_faces, classify_edges,
+     convex_hull_triangles) = _import_geometry()
     GEOMETRY_AVAILABLE = True
 except ImportError:
     if os.path.isdir(_PACKAGES_FALLBACK) and _PACKAGES_FALLBACK not in sys.path:
         sys.path.append(_PACKAGES_FALLBACK)
     try:
-        cmg, validate_obj, violating_faces, classify_edges = _import_geometry()
+        (cmg, validate_obj, violating_faces, classify_edges,
+         convex_hull_triangles) = _import_geometry()
         GEOMETRY_AVAILABLE = True
     except ImportError:
         cmg = None
         validate_obj = None
         violating_faces = None
         classify_edges = None
+        convex_hull_triangles = None
         GEOMETRY_AVAILABLE = False
 
 GEOMETRY_IMPORT_ERROR = (
@@ -147,15 +152,42 @@ def check_mesh_convexity(mesh_obj):
 def _build_convex_hull_bmesh(world_coords):
     """Return a triangulated convex-hull bmesh from world-space coords.
 
-    Builds the convex hull of the given points, discards interior/unused input
-    points, recomputes outward normals, and triangulates. Does NOT recenter, so
-    a caller writing the result back through an object's inverse matrix keeps the
+    Builds the hull with the double-precision quickhull in
+    ``convexity_geometry`` (Blender's ``bmesh.ops.convex_hull`` merges nearly
+    coplanar faces with a cloud-relative tolerance and its output can fail the
+    collision_mesh_geometry convexity check by several millimetres). Falls
+    back to the Blender operator if quickhull fails. Does NOT recenter, so a
+    caller writing the result back through an object's inverse matrix keeps the
     object's origin and transform. Returns the bmesh, or None when there are
-    fewer than 4 points or the hull has no solid faces (coplanar/collinear input).
-    The caller owns (must free) a returned bmesh.
+    fewer than 4 points or the hull has no solid faces (coplanar/collinear
+    input). The caller owns (must free) a returned bmesh.
     """
     if len(world_coords) < 4:
         return None
+
+    try:
+        tris = convex_hull_triangles(
+            [(c.x, c.y, c.z) for c in world_coords],
+            tolerance=validate_obj.CONVEXITY_TOLERANCE,
+        )
+    except Exception:
+        tris = None
+    if tris:
+        bm = bmesh.new()
+        try:
+            remap = {
+                i: bm.verts.new(world_coords[i])
+                for i in sorted({i for tri in tris for i in tri})
+            }
+            for tri in tris:
+                bm.faces.new((remap[tri[0]], remap[tri[1]], remap[tri[2]]))
+            bm.verts.ensure_lookup_table()
+            bm.faces.ensure_lookup_table()
+            bm.normal_update()
+            return bm
+        except Exception:
+            bm.free()
+
     bm = bmesh.new()
     for co in world_coords:
         bm.verts.new(co)
@@ -175,12 +207,21 @@ def _build_convex_hull_bmesh(world_coords):
     return bm
 
 
-def _evaluate_convexity(bm, tolerance):
-    """Count convexity-violating triangles for the current bmesh geometry.
+PolicyCounts = namedtuple(
+    "PolicyCounts", ["violations", "degenerate", "boundary", "nonmanifold"]
+)
+PolicyCounts.total = property(lambda self: sum(self))
+
+_CLEAN_COUNTS = PolicyCounts(0, 0, 0, 0)
+
+
+def _evaluate_policy(bm, tolerance):
+    """Evaluate the full collision-mesh policy for the current bmesh geometry.
 
     Triangulates a throwaway copy (so the live bmesh is untouched) and runs the
-    same per-vertex convex test used by ``check_mesh_convexity``. Returns
-    ``(triangle_count, violating_count)``.
+    same four tests as ``check_mesh_convexity``: convexity violations,
+    degenerate triangles, boundary edges, and non-manifold edges. Returns
+    ``(triangle_count, PolicyCounts)``.
     """
     eval_bm = bm.copy()
     try:
@@ -189,29 +230,36 @@ def _evaluate_convexity(bm, tolerance):
         eval_bm.verts.index_update()
         verts = [(v.co.x, v.co.y, v.co.z) for v in eval_bm.verts]
         tris = [[v.index for v in f.verts] for f in eval_bm.faces]
-        return len(tris), len(violating_faces(verts, tris, tolerance))
+        violations = len(violating_faces(verts, tris, tolerance))
+        degenerate = sum(
+            1 for tri in tris
+            if cmg.triangle_is_degenerate(verts[tri[0]], verts[tri[1]], verts[tri[2]])
+        )
+        boundary, nonmanifold, _ = cmg.check_watertight(tris)
+        return len(tris), PolicyCounts(violations, degenerate, boundary, nonmanifold)
     finally:
         eval_bm.free()
 
 
 def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
                       rebuild_hull=True):
-    """Fix degenerate and non-convex collision meshes.
+    """Fix collision meshes that fail the collision_mesh_geometry policy.
 
     1. Delete degenerate (zero-area) faces and clean up orphaned
-       geometry.  Zero-area faces occupy no space so no hole-fill is
-       needed.
+       geometry.
     2. Weld vertices closer than *weld_distance* to collapse
        near-duplicate verts that create micro-area faces.
     3. Recalculate normals outward to fix any winding inconsistencies
        that cause false convexity violations.
-    4. If the mesh is still non-convex and *rebuild_hull* is True,
-       rebuild its convex hull in place (triangulated), which guarantees
-       a convex, watertight, manifold result. The object's transform and
-       origin are preserved.
+    4. If the mesh still fails any part of the policy that Check
+       Convexity enforces (non-convex faces, degenerate triangles,
+       boundary edges, or non-manifold edges) and *rebuild_hull* is
+       True, rebuild its convex hull in place (triangulated), which
+       guarantees a convex, watertight, manifold result. The object's
+       transform and origin are preserved.
 
     Returns (degenerate_deleted, verts_welded, normals_fixed,
-             remaining_count, hull_rebuilt).
+             remaining: PolicyCounts, hull_rebuilt).
     """
     mesh = mesh_obj.data
     bm = bmesh.new()
@@ -224,7 +272,7 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
         bm.faces.ensure_lookup_table()
 
         if len(bm.verts) < 4 or len(bm.faces) == 0:
-            return 0, 0, 0, 0, False
+            return 0, 0, 0, _CLEAN_COUNTS, False
 
         # --- Pass 1: delete degenerate faces ---
         degen_faces = []
@@ -253,33 +301,33 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
             bm.transform(inv_mat)
             bm.to_mesh(mesh)
             mesh.update()
-            return degen_count, welded, 0, 0, False
+            return degen_count, welded, 0, _CLEAN_COUNTS, False
 
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
         bm.normal_update()
 
         tolerance = validate_obj.CONVEXITY_TOLERANCE
-        tri_count, violations_before = _evaluate_convexity(bm, tolerance)
-        remaining = violations_before
+        tri_count, counts_before = _evaluate_policy(bm, tolerance)
+        remaining = counts_before
 
         # If most faces report violations, recalc picked inward winding; flip all
         # and re-evaluate with the same package test.
-        if violations_before * 2 > tri_count:
+        if counts_before.violations * 2 > tri_count:
             bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
             bm.normal_update()
-            _, remaining = _evaluate_convexity(bm, tolerance)
+            _, remaining = _evaluate_policy(bm, tolerance)
 
-        normals_fixed = max(0, violations_before - remaining)
+        normals_fixed = max(0, counts_before.violations - remaining.violations)
 
         hull_rebuilt = False
-        if rebuild_hull and remaining > 0 and len(bm.verts) >= 4:
+        if rebuild_hull and remaining.total > 0 and len(bm.verts) >= 4:
             coords = [v.co.copy() for v in bm.verts]  # world space, post-weld
             hull_bm = _build_convex_hull_bmesh(coords)
             if hull_bm is not None:
                 bm.free()
                 bm = hull_bm
                 hull_rebuilt = True
-                _, remaining = _evaluate_convexity(bm, tolerance)
+                _, remaining = _evaluate_policy(bm, tolerance)
 
         bm.transform(inv_mat)
         bm.to_mesh(mesh)
@@ -296,15 +344,17 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
     bl_label = "Fix Convexity"
     bl_description = (
         "Delete zero-area faces, weld nearby vertices, recalculate normals, "
-        "and rebuild the convex hull in place when a mesh stays non-convex"
+        "and rebuild the convex hull in place when a mesh stays non-convex, "
+        "open, or non-manifold"
     )
     bl_options = {'REGISTER', 'UNDO'}
 
     rebuild_hull: bpy.props.BoolProperty(
         name="Rebuild Hull",
         description=(
-            "When gentle repairs can't make a mesh convex, rebuild its convex "
-            "hull in place (replaces the mesh topology)"
+            "When gentle repairs can't make a mesh convex, watertight, and "
+            "manifold, rebuild its convex hull in place (replaces the mesh "
+            "topology)"
         ),
         default=True,
     )
@@ -354,10 +404,10 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
         total_degen = 0
         total_welded = 0
         total_normals = 0
-        total_remaining = 0
+        total_remaining = _CLEAN_COUNTS
         total_hull = 0
         touched_objects = 0
-        concave_objects = 0
+        dirty_objects = []
 
         for obj in mesh_objects:
             degen, welded, normals, remaining, rebuilt = fix_invalid_faces(
@@ -369,12 +419,14 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
             total_welded += welded
             total_normals += normals
             total_hull += 1 if rebuilt else 0
-            total_remaining += remaining
-            if remaining > 0:
-                concave_objects += 1
+            total_remaining = PolicyCounts(
+                *(a + b for a, b in zip(total_remaining, remaining))
+            )
+            if remaining.total > 0:
+                dirty_objects.append(obj.name)
 
         did_work = total_degen + total_welded + total_normals + total_hull
-        if did_work == 0 and total_remaining == 0:
+        if did_work == 0 and total_remaining.total == 0:
             self.report({'INFO'}, "All meshes are already clean")
             return {'FINISHED'}
 
@@ -393,13 +445,27 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
         else:
             msg = "No repairs applied"
 
-        if total_remaining:
+        if total_remaining.total:
+            issues = []
+            if total_remaining.violations:
+                issues.append(f"{total_remaining.violations} non-convex")
+            if total_remaining.degenerate:
+                issues.append(f"{total_remaining.degenerate} degenerate")
+            if total_remaining.boundary:
+                issues.append(f"{total_remaining.boundary} boundary")
+            if total_remaining.nonmanifold:
+                issues.append(f"{total_remaining.nonmanifold} non-manifold")
             msg += (
-                f" — {total_remaining} concavities remain on "
-                f"{concave_objects} object(s)"
+                f" — {' + '.join(issues)} remain on "
+                f"{len(dirty_objects)} object(s): "
+                f"{', '.join(dirty_objects[:5])}"
             )
+            if len(dirty_objects) > 5:
+                msg += ", …"
             if not self.rebuild_hull:
                 msg += "; enable Rebuild Hull to fix"
+            else:
+                msg += "; geometry may be too flat to form a solid hull"
             self.report({'WARNING'}, msg)
         else:
             self.report({'INFO'}, msg)
