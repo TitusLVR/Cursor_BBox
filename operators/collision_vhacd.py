@@ -110,7 +110,9 @@ class CursorBBox_OT_collision_vhacd(bpy.types.Operator):
     bl_idname = "cursor_bbox.collision_vhacd"
     bl_label = "V-HACD Decomposition"
     bl_description = "Approximate convex decomposition using V-HACD (Voxelized Hierarchical ACD)"
-    bl_options = {'REGISTER', 'UNDO'}
+    # NOT 'UNDO': async operator, hulls are created later from a timer which
+    # pushes its own clean undo step. See async_subprocess._finish_job.
+    bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):

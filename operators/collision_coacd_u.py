@@ -192,7 +192,14 @@ class CursorBBox_OT_collision_coacd_u(bpy.types.Operator):
         "Fast collision-aware approximate convex decomposition "
         "using CoACD-U (Ultikynnys variant, 3-10x faster, PCA bug fixed)"
     )
-    bl_options = {'REGISTER', 'UNDO'}
+    # NOTE: deliberately NOT 'UNDO'. This operator only launches an async
+    # subprocess and returns FINISHED immediately — it makes no undoable change
+    # to the scene. The hull objects are created later from a timer callback
+    # (see async_subprocess._finish_job), which pushes its own clean undo step.
+    # Registering 'UNDO' here recorded an empty pre-import step whose memory
+    # snapshot conflicted with the timer-created datablocks, crashing Blender
+    # on Ctrl+Z.
+    bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):

@@ -300,8 +300,15 @@ def _finish_job(job):
 
         print(f"[{job.tool_name}] Created {count} hull(s) for '{job.obj_name}' ({elapsed:.1f}s)")
 
-        # Restore the user's selection state
-        bpy.ops.object.select_all(action='DESELECT')
+        # Restore the user's selection state. Use the low-level API only — NO
+        # bpy.ops here: this runs inside a bpy.app.timers callback, and calling
+        # operators from a timer corrupts the undo stack (see _finish_job /
+        # import_obj_as_new_objects docstrings).
+        for ob in ctx.view_layer.objects:
+            try:
+                ob.select_set(False)
+            except Exception:
+                pass
         for obj in saved_selected:
             try:
                 obj.select_set(True)
@@ -312,6 +319,16 @@ def _finish_job(job):
                 ctx.view_layer.objects.active = saved_active
             except Exception:
                 pass
+
+        # Record ONE clean undo step that includes the freshly created hulls.
+        # The data was mutated from this timer callback (outside an operator),
+        # so the undo stack has no consistent snapshot of it. Without this push,
+        # pressing Ctrl+Z reverts to a state whose pointers to the timer-created
+        # datablocks are dangling, which hard-crashes Blender.
+        try:
+            bpy.ops.ed.undo_push(message=f"{job.tool_name}: {job.obj_name} hulls")
+        except Exception as undo_exc:
+            print(f"[{job.tool_name}] Warning: undo_push failed: {undo_exc}")
 
         job.cleanup()
         return count

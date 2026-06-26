@@ -99,7 +99,9 @@ class CursorBBox_OT_collision_coacd(bpy.types.Operator):
     bl_idname = "cursor_bbox.collision_coacd"
     bl_label = "CoACD Decomposition"
     bl_description = "Collision-aware approximate convex decomposition using CoACD (SIGGRAPH 2022)"
-    bl_options = {'REGISTER', 'UNDO'}
+    # NOT 'UNDO': async operator, hulls are created later from a timer which
+    # pushes its own clean undo step. See async_subprocess._finish_job.
+    bl_options = {'REGISTER'}
 
     @classmethod
     def poll(cls, context):

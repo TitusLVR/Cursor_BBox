@@ -26,6 +26,8 @@ class CursorBBox_MT_pie_menu(bpy.types.Menu):
         box.separator(factor=0.3)
         op = box.operator("cursor_bbox.hull_per_island", text="Hull Per Island")
         op.push_value = scene.cursor_bbox_push
+        box.separator(factor=0.3)
+        box.operator("cursor_bbox.use_active_collection", text="Use Active Collection", icon='EYEDROPPER')
 
         # South: Interactive Hull
         op = pie.operator("cursor_bbox.interactive_hull", text="Interactive Hull", icon='MESH_ICOSPHERE')
