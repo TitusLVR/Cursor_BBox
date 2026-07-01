@@ -20,9 +20,21 @@ class CursorBBox_MT_pie_menu(bpy.types.Menu):
         box = col.box().column(align=True)
         box.label(text="Decomposition", icon='MOD_MESHDEFORM')
         box.separator(factor=0.3)
-        box.operator("cursor_bbox.collision_vhacd", text="V-HACD")
-        box.operator("cursor_bbox.collision_coacd", text="CoACD")
-        box.operator("cursor_bbox.collision_coacd_u", text="CoACD-U")
+
+        # Per-method Detail preset dropdown + run button, side by side.
+        # The preset EnumProperty rewrites the method's detail values via its
+        # own update callback (see settings/properties.py).
+        for pg_name, op_id, label in (
+            ("cursor_bbox_vhacd", "cursor_bbox.collision_vhacd", "V-HACD"),
+            ("cursor_bbox_coacd", "cursor_bbox.collision_coacd", "CoACD"),
+            ("cursor_bbox_coacd_u", "cursor_bbox.collision_coacd_u", "CoACD-U"),
+        ):
+            # Explicit 50/50 split: the pie's auto width-distribution can drop
+            # the trailing operator on some rows, so allocate both cells.
+            row = box.split(factor=0.5, align=True)
+            row.prop(getattr(scene, pg_name), "preset", text="")
+            row.operator(op_id, text=label)
+
         box.separator(factor=0.3)
         op = box.operator("cursor_bbox.hull_per_island", text="Hull Per Island")
         op.push_value = scene.cursor_bbox_push
