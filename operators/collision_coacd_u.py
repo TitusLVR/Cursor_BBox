@@ -55,6 +55,12 @@ def write_obj(filepath, parts):
 
 params = json.load(open(sys.argv[1]))
 
+# The bare python.exe does not have Blender's script paths or pip's
+# user-site on sys.path — inject the dir coacd_u was found in.
+for _p in params.get("sys_path", []):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
 try:
     import coacd_u as coacd
 except ImportError:
@@ -175,8 +181,40 @@ COACD_U_PRESETS = {
 }
 
 
+def get_install_target_dir():
+    """Directory to pip-install coacd_u into.
+
+    Blender's user scripts/modules dir is always on sys.path inside Blender,
+    works without admin rights, and survives Blender upgrades — unlike
+    Blender's own site-packages (often read-only under Program Files, which
+    makes pip silently fall back to a --user install that Blender never
+    adds to sys.path).
+    """
+    return bpy.utils.user_resource('SCRIPTS', path="modules", create=True)
+
+
+def ensure_coacd_u_on_path():
+    """Add directories that may contain coacd_u but that Blender's Python
+    does not scan by default (pip's --user fallback location)."""
+    import importlib
+    candidates = [get_install_target_dir()]
+    try:
+        import site
+        user_site = site.getusersitepackages()
+        if user_site:
+            candidates.append(user_site)
+    except Exception:
+        pass
+    for path in candidates:
+        if (path and os.path.isdir(os.path.join(path, 'coacd_u'))
+                and path not in sys.path):
+            sys.path.append(path)
+            importlib.invalidate_caches()
+
+
 def is_coacd_u_available():
     """Check whether the coacd_u Python package is importable."""
+    ensure_coacd_u_on_path()
     try:
         import coacd_u  # noqa: F401
         return True
@@ -266,6 +304,15 @@ class CursorBBox_OT_collision_coacd_u(bpy.types.Operator):
 
         export_mesh_as_obj(context, obj, export_path)
 
+        # Locate the installed coacd_u package so the subprocess can find it
+        # (execute() already verified it is importable in Blender).
+        extra_paths = []
+        try:
+            import coacd_u
+            extra_paths.append(os.path.dirname(os.path.dirname(coacd_u.__file__)))
+        except ImportError:
+            pass
+
         # Write the helper script
         with open(script_path, 'w') as f:
             f.write(_HELPER_SCRIPT)
@@ -274,6 +321,7 @@ class CursorBBox_OT_collision_coacd_u(bpy.types.Operator):
         params = {
             'input': export_path,
             'output': output_path,
+            'sys_path': extra_paths,
             'threshold': pg.threshold,
             'max_convex_hull': pg.max_convex_hull,
             'preprocess_mode': pg.preprocess_mode,

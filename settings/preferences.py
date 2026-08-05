@@ -304,12 +304,8 @@ class CursorBBoxPreferences(AddonPreferences):
             row = box.row()
             row.label(text="CoACD-U (Ultikynnys Variant, 3-10x Faster):", icon='MOD_MESHDEFORM')
             col = box.column(align=True)
-            try:
-                import coacd_u
-                has_coacd_u = True
-            except ImportError:
-                has_coacd_u = False
-            if has_coacd_u:
+            from ..operators.collision_coacd_u import is_coacd_u_available
+            if is_coacd_u_available():
                 row = box.row()
                 row.label(text="coacd_u installed", icon='CHECKMARK')
             else:

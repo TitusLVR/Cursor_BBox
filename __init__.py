@@ -116,15 +116,23 @@ class CursorBBox_OT_install_coacd_u(bpy.types.Operator):
             )
             return {'CANCELLED'}
 
-        # Install with pip
-        print(f"[CoACD-U] Installing {wheel_name}...")
+        # Install with pip into Blender's user scripts/modules directory.
+        # A plain `pip install` silently falls back to a --user install when
+        # Blender's site-packages is read-only (Program Files), and Blender
+        # never adds that user-site dir to sys.path — the package ends up
+        # installed but invisible. The user modules dir is always on
+        # sys.path and needs no admin rights.
+        from .operators.collision_coacd_u import get_install_target_dir
+        target_dir = get_install_target_dir()
+        print(f"[CoACD-U] Installing {wheel_name} into {target_dir}...")
         try:
             popen_kwargs = {}
             if sys.platform == 'win32':
                 popen_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
 
             result = subprocess.run(
-                [sys.executable, '-m', 'pip', 'install', '--no-deps', wheel_url],
+                [sys.executable, '-m', 'pip', 'install', '--no-deps',
+                 '--upgrade', '--target', target_dir, wheel_url],
                 capture_output=True, text=True, timeout=120,
                 **popen_kwargs,
             )
@@ -146,8 +154,20 @@ class CursorBBox_OT_install_coacd_u(bpy.types.Operator):
             self.report({'ERROR'}, f"Installation failed: {e}")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, "coacd_u installed successfully! Restart Blender to use it.")
-        print("[CoACD-U] Installation complete! Restart Blender to use it.")
+        # Verify the install actually made the package importable.
+        import importlib
+        importlib.invalidate_caches()
+        from .operators.collision_coacd_u import is_coacd_u_available
+        if is_coacd_u_available():
+            self.report({'INFO'}, "coacd_u installed and ready — no restart needed.")
+            print("[CoACD-U] Installation complete and verified.")
+        else:
+            self.report(
+                {'WARNING'},
+                "pip finished but coacd_u is still not importable. "
+                "Check System Console for details."
+            )
+            print(f"[CoACD-U] Installed to {target_dir} but import failed.")
         return {'FINISHED'}
 
 
