@@ -20,24 +20,42 @@ def _import_geometry():
     return cmg, validate_obj, violating_faces, classify_edges, convex_hull_triangles
 
 
-try:
-    (cmg, validate_obj, violating_faces, classify_edges,
-     convex_hull_triangles) = _import_geometry()
-    GEOMETRY_AVAILABLE = True
-except ImportError:
-    if os.path.isdir(_PACKAGES_FALLBACK) and _PACKAGES_FALLBACK not in sys.path:
-        sys.path.append(_PACKAGES_FALLBACK)
+cmg = None
+validate_obj = None
+violating_faces = None
+classify_edges = None
+convex_hull_triangles = None
+GEOMETRY_AVAILABLE = False
+
+
+def ensure_geometry():
+    """Import the geometry dependencies, retrying on every call.
+
+    The s:\\ drive may not exist yet when the addon loads (it is a per-logon
+    subst mapping), so a failed import at load time must not be final —
+    operators call this again at execute time.
+    """
+    global cmg, validate_obj, violating_faces, classify_edges
+    global convex_hull_triangles, GEOMETRY_AVAILABLE
+    if GEOMETRY_AVAILABLE:
+        return True
     try:
         (cmg, validate_obj, violating_faces, classify_edges,
          convex_hull_triangles) = _import_geometry()
         GEOMETRY_AVAILABLE = True
     except ImportError:
-        cmg = None
-        validate_obj = None
-        violating_faces = None
-        classify_edges = None
-        convex_hull_triangles = None
-        GEOMETRY_AVAILABLE = False
+        if os.path.isdir(_PACKAGES_FALLBACK) and _PACKAGES_FALLBACK not in sys.path:
+            sys.path.append(_PACKAGES_FALLBACK)
+        try:
+            (cmg, validate_obj, violating_faces, classify_edges,
+             convex_hull_triangles) = _import_geometry()
+            GEOMETRY_AVAILABLE = True
+        except ImportError:
+            GEOMETRY_AVAILABLE = False
+    return GEOMETRY_AVAILABLE
+
+
+ensure_geometry()
 
 GEOMETRY_IMPORT_ERROR = (
     "collision_mesh_geometry is not importable - ensure s:\\packages is on PYTHONPATH"
@@ -387,7 +405,7 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
         )
 
     def execute(self, context):
-        if not GEOMETRY_AVAILABLE:
+        if not ensure_geometry():
             self.report({'ERROR'}, GEOMETRY_IMPORT_ERROR)
             return {'CANCELLED'}
 
@@ -490,7 +508,7 @@ class CursorBBox_OT_check_convexity(bpy.types.Operator):
         )
 
     def execute(self, context):
-        if not GEOMETRY_AVAILABLE:
+        if not ensure_geometry():
             self.report({'ERROR'}, GEOMETRY_IMPORT_ERROR)
             return {'CANCELLED'}
 
