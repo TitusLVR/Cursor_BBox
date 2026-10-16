@@ -367,6 +367,15 @@ def register():
         unit='ROTATION'
     )
 
+    bpy.types.Scene.cursor_bbox_brush_radius = bpy.props.IntProperty(
+        name="Brush Radius",
+        description="Radius in pixels of the LMB-drag face-marking brush",
+        default=50,
+        min=5,
+        max=1000,
+        subtype='PIXEL',
+    )
+
     bpy.types.Scene.cursor_bbox_name_box = bpy.props.StringProperty(
         name="Box Name",
         description="Name pattern for Box objects",
@@ -507,6 +516,7 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_align_face
     del bpy.types.Scene.cursor_bbox_select_coplanar
     del bpy.types.Scene.cursor_bbox_coplanar_angle
+    del bpy.types.Scene.cursor_bbox_brush_radius
     del bpy.types.Scene.cursor_bbox_name_box
     del bpy.types.Scene.cursor_bbox_name_hull
     del bpy.types.Scene.cursor_bbox_name_sphere

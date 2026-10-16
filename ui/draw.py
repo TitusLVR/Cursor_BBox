@@ -438,6 +438,49 @@ def draw_bbox_preview(gpu_manager, current_bbox_data, use_culling=False):
 
 # ===== HANDLER WRAPPER FUNCTIONS =====
 
+def draw_brush_circle(gpu_manager, brush_circle):
+    """Draw the 2D brush circle (POST_PIXEL). ``brush_circle`` is
+    ``{'center': (x, y), 'radius': px, 'remove': bool}`` or None."""
+    if not brush_circle:
+        return
+    from ..functions.brush_select import circle_points
+    pts = circle_points(brush_circle['center'], brush_circle['radius'])
+    coords = [(x, y, 0.0) for x, y in pts]
+    shader = gpu_manager.get_shader('UNIFORM_COLOR')
+    batch = batch_for_shader(shader, 'LINE_STRIP', {"pos": coords})
+    if brush_circle.get('remove'):
+        color = (1.0, 0.35, 0.3, 0.9)
+    else:
+        color = (1.0, 1.0, 1.0, 0.9)
+    gpu.state.blend_set('ALPHA')
+    gpu.state.line_width_set(1.5)
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+    gpu.state.line_width_set(1.0)
+    gpu.state.blend_set('NONE')
+
+
+def create_brush_circle_handler(state):
+    def draw_brush_circle_wrapper():
+        draw_brush_circle(state.gpu_manager, getattr(state, 'brush_circle', None))
+    return draw_brush_circle_wrapper
+
+
+def enable_brush_circle(state):
+    if 'brush_circle' not in state.handlers:
+        state.handlers['brush_circle'] = bpy.types.SpaceView3D.draw_handler_add(
+            create_brush_circle_handler(state), (), 'WINDOW', 'POST_PIXEL'
+        )
+
+
+def disable_brush_circle(state):
+    if 'brush_circle' in state.handlers:
+        bpy.types.SpaceView3D.draw_handler_remove(state.handlers['brush_circle'], 'WINDOW')
+        del state.handlers['brush_circle']
+    state.brush_circle = None
+
+
 def create_edge_highlight_handler(state):
     """Create edge highlight drawing handler"""
     def draw_edge_highlight_wrapper():

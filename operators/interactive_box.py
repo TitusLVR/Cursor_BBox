@@ -60,6 +60,7 @@ from ..functions.core import (
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
 from ..settings.preferences import get_preferences
+from .brush_mixin import BrushMarkingMixin
 from ..ui.hud.controller import HUDController
 from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
 from ..functions.undo_stack import OperatorUndoStack
@@ -176,7 +177,7 @@ def create_bounding_box_from_marked(marked_faces_dict, marked_points=None, push_
     
     return True
 
-class CursorBBox_OT_interactive_box(bpy.types.Operator):
+class CursorBBox_OT_interactive_box(BrushMarkingMixin, bpy.types.Operator):
     """Place cursor and create bounding box with face marking support"""
     bl_idname = "cursor_bbox.interactive_box"
     bl_label = "Interactive Box"
@@ -288,6 +289,72 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         if context.area is not None:
             context.area.tag_redraw()
 
+    def _brush_update_preview(self, context):
+        cursor_rotation = get_cursor_rotation_euler(context)
+        update_marked_faces_bbox(self.marked_faces, self.push_value,
+                                 context.scene.cursor.location,
+                                 cursor_rotation,
+                                 marked_points=self.marked_points,
+                                 use_depsgraph=self.use_depsgraph)
+
+    def _click_mark_face(self, context, event):
+        """Original single-click mark/unmark (with optional coplanar flood)."""
+        # Normal Mark/Place Logic
+        # Mark/unmark face under cursor
+        face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+        if face_data and face_data['object'] in self.original_selected_objects:
+            obj = face_data['object']
+            face_idx = face_data['face_index']
+
+            # Also place cursor for feedback (optional, but good for "Place Cursor" tool)
+            place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph)
+
+            # Initialize object's marked faces if needed
+            if obj not in self.marked_faces:
+                self.marked_faces[obj] = set()
+
+            # Determine faces to process (Coplanar logic)
+            faces_to_process = get_faces_to_process(
+                obj, face_idx, context.scene.cursor_bbox_select_coplanar,
+                context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
+            )
+
+            # Check if we are marking or unmarking based on the clicked face
+            # If clicked face is marked, we unmark group. Else mark group.
+            is_unmarking = face_idx in self.marked_faces[obj]
+
+            for idx in faces_to_process:
+                if is_unmarking:
+                    if idx in self.marked_faces[obj]:
+                        self.marked_faces[obj].remove(idx)
+                else:
+                    self.marked_faces[obj].add(idx)
+
+            # Rebuild visual
+            if not self.marked_faces[obj]:
+                del self.marked_faces[obj]
+                unmark_face(obj, face_idx) # This might not clear enough if we did batch unmark? 
+                # use clear and rebuild to be safe
+                clear_marked_faces() # Global clear is too strong if multiple objects
+                rebuild_marked_faces_visual_data(obj, set(), use_depsgraph=self.use_depsgraph) # Clear this obj
+                # But we might have other objects?
+                # rebuild_marked_faces_visual_data handles single obj.
+
+                # Hack: The utils function mark_face/unmark_face are for single.
+                # We need batch update.
+                # rebuild_marked_faces_visual_data(obj, self.marked_faces.get(obj, set()))
+
+            rebuild_marked_faces_visual_data(obj, self.marked_faces.get(obj, set()), use_depsgraph=self.use_depsgraph)
+
+            # Update bbox preview based on marked faces and points
+            cursor_rotation = get_cursor_rotation_euler(context)
+            update_marked_faces_bbox(self.marked_faces, self.push_value, 
+                                   context.scene.cursor.location, 
+                                   cursor_rotation,
+                                   marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+            context.area.tag_redraw()
+
+
     def _push_undo(self):
         """Snapshot current state before a mutating action."""
         self.undo_stack.push(self._snapshot())
@@ -298,6 +365,8 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         # Help overlay — corner-anchored hotkey legend.
         self.hud_ctl.help.add_section(HUDSection("Object Mode", [
             HUDItem("Mark / unmark face", "LMB"),
+            HUDItem("Brush mark / unmark", "LMB drag / Ctrl+LMB drag"),
+            HUDItem("Brush radius", "[ / ]"),
             HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create bounding box", "SPACE"),
             HUDItem("Enter point mode", "A"),
@@ -377,6 +446,10 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             if self.hud_ctl.handle_events(context, event):
                 return {'RUNNING_MODAL'}
 
+        # Circle brush: LMB drag marks, Ctrl+LMB drag unmarks, [ / ] radius.
+        if self._brush_handle_event(context, event):
+            return {'RUNNING_MODAL'}
+
         # Undo / Redo (Ctrl+Z / Ctrl+Shift+Z)
         if (event.type == 'Z' and event.value == 'PRESS'
                 and event.ctrl and not event.alt):
@@ -422,6 +495,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
+            self._brush_shutdown()
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
@@ -439,6 +513,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
+            self._brush_shutdown()
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
@@ -556,16 +631,14 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         # Snap Threshold Adjustment (Ctrl + Scroll)
-        if event.ctrl and not event.shift and not event.alt:
+        if (event.ctrl and not event.shift and not event.alt
+                and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}):
             if event.type == 'WHEELUPMOUSE':
                 self.snap_threshold += 10
-                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
-                context.area.tag_redraw()
-            elif event.type == 'WHEELDOWNMOUSE':
+            else:
                 self.snap_threshold = max(10, self.snap_threshold - 10)
-                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
-                context.area.tag_redraw()
-            
+            self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
+            context.area.tag_redraw()
             return {'RUNNING_MODAL'}
         
         # Toggle Depsgraph (D)
@@ -694,8 +767,8 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
         
         # Mark Face (LMB) — snapshot before any state-mutating click.
         elif event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            self._push_undo()
             if self.point_mode:
+                self._push_undo()
                 # Add Point Logic
                 face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
                 
@@ -726,63 +799,10 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
                 context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
             
-            # Normal Mark/Place Logic
-            # Mark/unmark face under cursor
-            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
-            if face_data and face_data['object'] in self.original_selected_objects:
-                obj = face_data['object']
-                face_idx = face_data['face_index']
-                
-                # Also place cursor for feedback (optional, but good for "Place Cursor" tool)
-                place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph)
-                
-                # Initialize object's marked faces if needed
-                if obj not in self.marked_faces:
-                    self.marked_faces[obj] = set()
-                
-                # Determine faces to process (Coplanar logic)
-                faces_to_process = get_faces_to_process(
-                    obj, face_idx, context.scene.cursor_bbox_select_coplanar,
-                    context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
-                )
-
-                # Check if we are marking or unmarking based on the clicked face
-                # If clicked face is marked, we unmark group. Else mark group.
-                is_unmarking = face_idx in self.marked_faces[obj]
-                
-                for idx in faces_to_process:
-                    if is_unmarking:
-                        if idx in self.marked_faces[obj]:
-                            self.marked_faces[obj].remove(idx)
-                    else:
-                        self.marked_faces[obj].add(idx)
-
-                # Rebuild visual
-                if not self.marked_faces[obj]:
-                    del self.marked_faces[obj]
-                    unmark_face(obj, face_idx) # This might not clear enough if we did batch unmark? 
-                    # use clear and rebuild to be safe
-                    clear_marked_faces() # Global clear is too strong if multiple objects
-                    rebuild_marked_faces_visual_data(obj, set(), use_depsgraph=self.use_depsgraph) # Clear this obj
-                    # But we might have other objects?
-                    # rebuild_marked_faces_visual_data handles single obj.
-                    
-                    # Hack: The utils function mark_face/unmark_face are for single.
-                    # We need batch update.
-                    # rebuild_marked_faces_visual_data(obj, self.marked_faces.get(obj, set()))
-                
-                rebuild_marked_faces_visual_data(obj, self.marked_faces.get(obj, set()), use_depsgraph=self.use_depsgraph)
-                
-                # Update bbox preview based on marked faces and points
-                cursor_rotation = get_cursor_rotation_euler(context)
-                update_marked_faces_bbox(self.marked_faces, self.push_value, 
-                                       context.scene.cursor.location, 
-                                       cursor_rotation,
-                                       marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
-                context.area.tag_redraw()
-            
+            # Normal mode: defer to LMB release so a drag can become a brush stroke.
+            self._brush_on_press(event)
             return {'RUNNING_MODAL'}
-        
+
         elif event.type == 'F' and event.value == 'PRESS':
             # Mark/unmark face under cursor
             face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
@@ -1111,6 +1131,7 @@ class CursorBBox_OT_interactive_box(bpy.types.Operator):
             enable_edge_highlight()
             enable_bbox_preview()
             enable_face_marking()
+            self._brush_init(context)
             self._setup_hud(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}

@@ -60,6 +60,7 @@ from ..functions.core import (
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
 from ..settings.preferences import get_preferences
+from .brush_mixin import BrushMarkingMixin
 from ..ui.hud.controller import HUDController
 from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
 from ..functions.undo_stack import OperatorUndoStack
@@ -157,7 +158,7 @@ def create_bounding_sphere_from_marked(marked_faces_dict, marked_points=None, se
     
     return True
 
-class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
+class CursorBBox_OT_interactive_sphere(BrushMarkingMixin, bpy.types.Operator):
     """Create bounding sphere from marked faces"""
     bl_idname = "cursor_bbox.interactive_sphere"
     bl_label = "Interactive Sphere"
@@ -258,6 +259,57 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         if context.area is not None:
             context.area.tag_redraw()
 
+    def _brush_update_preview(self, context):
+        cursor_rotation = get_cursor_rotation_euler(context)
+        update_marked_faces_sphere(self.marked_faces,
+                                   context.scene.cursor.location,
+                                   cursor_rotation,
+                                   marked_points=self.marked_points,
+                                   use_depsgraph=self.use_depsgraph)
+
+    def _click_mark_face(self, context, event):
+        """Original single-click / F-key mark/unmark (with optional coplanar flood)."""
+        # Normal Mark Face Logic
+        face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
+        if face_data and face_data['object'] in self.original_selected_objects:
+            obj = face_data['object']
+            face_idx = face_data['face_index']
+
+            # Also place cursor for feedback
+            place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph)
+
+            if obj not in self.marked_faces:
+                self.marked_faces[obj] = set()
+
+            # Check if unmarking (if single face is already marked)
+            is_unmarking = face_idx in self.marked_faces[obj]
+
+            faces_to_process = get_faces_to_process(
+                obj, face_idx, context.scene.cursor_bbox_select_coplanar,
+                context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
+            )
+
+            for idx in faces_to_process:
+                if is_unmarking:
+                    if idx in self.marked_faces[obj]:
+                        self.marked_faces[obj].remove(idx)
+                else:
+                    self.marked_faces[obj].add(idx)
+
+            if not self.marked_faces[obj]:
+                del self.marked_faces[obj]
+                rebuild_marked_faces_visual_data(obj, set(), use_depsgraph=self.use_depsgraph)
+            else:
+                rebuild_marked_faces_visual_data(obj, self.marked_faces[obj], use_depsgraph=self.use_depsgraph)
+
+            # Update Preview (Use Sphere preview as it shows extent)
+            cursor_rotation = get_cursor_rotation_euler(context)
+            update_marked_faces_sphere(self.marked_faces, 
+                                     context.scene.cursor.location,
+                                     cursor_rotation,
+                                     marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
+            context.area.tag_redraw()
+
     def _push_undo(self):
         self.undo_stack.push(self._snapshot())
 
@@ -266,6 +318,8 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
         self.hud_ctl = HUDController("interactive_sphere", "Interactive Sphere")
         self.hud_ctl.help.add_section(HUDSection("Object Mode", [
             HUDItem("Mark / unmark face", "LMB"),
+            HUDItem("Brush mark / unmark", "LMB drag / Ctrl+LMB drag"),
+            HUDItem("Brush radius", "[ / ]"),
             HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create sphere", "SPACE"),
             HUDItem("Enter point mode", "A"),
@@ -340,6 +394,10 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             self.hud_ctl.update_event(event, context)
             if self.hud_ctl.handle_events(context, event):
                 return {'RUNNING_MODAL'}
+
+        # Circle brush: LMB drag marks, Ctrl+LMB drag unmarks, [ / ] radius.
+        if self._brush_handle_event(context, event):
+            return {'RUNNING_MODAL'}
 
         # Undo / Redo (Ctrl+Z / Ctrl+Shift+Z)
         if (event.type == 'Z' and event.value == 'PRESS'
@@ -536,16 +594,14 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             return {'RUNNING_MODAL'}
 
         # Snap Threshold Adjustment (Ctrl + Scroll) - Must be before navigation pass-through
-        if event.ctrl and not event.shift and not event.alt:
+        if (event.ctrl and not event.shift and not event.alt
+                and event.type in {'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}):
             if event.type == 'WHEELUPMOUSE':
                 self.snap_threshold += 10
-                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
-                context.area.tag_redraw()
-            elif event.type == 'WHEELDOWNMOUSE':
+            else:
                 self.snap_threshold = max(10, self.snap_threshold - 10)
-                self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
-                context.area.tag_redraw()
-            
+            self.report({'INFO'}, f"Snap Threshold: {self.snap_threshold}px")
+            context.area.tag_redraw()
             return {'RUNNING_MODAL'}
 
         # Navigation
@@ -605,48 +661,14 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
                 context.area.tag_redraw()
                 return {'RUNNING_MODAL'}
             
-            # Normal Mark Face Logic
-            face_data = get_face_edges_from_raycast(context, event, use_depsgraph=self.use_depsgraph)
-            if face_data and face_data['object'] in self.original_selected_objects:
-                obj = face_data['object']
-                face_idx = face_data['face_index']
-                
-                # Also place cursor for feedback
-                place_cursor_with_raycast_and_edge(context, event, self.align_to_face, self.current_edge_index, use_depsgraph=self.use_depsgraph)
-                
-                if obj not in self.marked_faces:
-                    self.marked_faces[obj] = set()
-                
-                # Check if unmarking (if single face is already marked)
-                is_unmarking = face_idx in self.marked_faces[obj]
-                
-                faces_to_process = get_faces_to_process(
-                    obj, face_idx, context.scene.cursor_bbox_select_coplanar,
-                    context.scene.cursor_bbox_coplanar_angle, use_depsgraph=self.use_depsgraph
-                )
-
-                for idx in faces_to_process:
-                    if is_unmarking:
-                        if idx in self.marked_faces[obj]:
-                            self.marked_faces[obj].remove(idx)
-                    else:
-                        self.marked_faces[obj].add(idx)
-                
-                if not self.marked_faces[obj]:
-                    del self.marked_faces[obj]
-                    rebuild_marked_faces_visual_data(obj, set(), use_depsgraph=self.use_depsgraph)
-                else:
-                    rebuild_marked_faces_visual_data(obj, self.marked_faces[obj], use_depsgraph=self.use_depsgraph)
-                
-                # Update Preview (Use Sphere preview as it shows extent)
-                cursor_rotation = get_cursor_rotation_euler(context)
-                update_marked_faces_sphere(self.marked_faces, 
-                                         context.scene.cursor.location,
-                                         cursor_rotation,
-                                         marked_points=self.marked_points, use_depsgraph=self.use_depsgraph)
-                context.area.tag_redraw()
+            if event.type == 'LEFTMOUSE':
+                # Defer to LMB release so a drag can become a brush stroke.
+                self._brush_on_press(event)
+                return {'RUNNING_MODAL'}
+            self._push_undo()
+            self._click_mark_face(context, event)
             return {'RUNNING_MODAL'}
-            
+
         # Toggle Limitation Plane (C)
         elif event.type == 'C' and event.value == 'PRESS':
             self.limit_plane_mode = not self.limit_plane_mode
@@ -989,6 +1011,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
+            self._brush_shutdown()
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
@@ -1006,6 +1029,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             disable_edge_highlight()
             disable_bbox_preview()
             disable_face_marking()
+            self._brush_shutdown()
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
@@ -1099,6 +1123,7 @@ class CursorBBox_OT_interactive_sphere(bpy.types.Operator):
             enable_face_marking()
             enable_edge_highlight()
             enable_bbox_preview()
+            self._brush_init(context)
             self._setup_hud(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}

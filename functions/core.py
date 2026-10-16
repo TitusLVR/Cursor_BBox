@@ -17,7 +17,9 @@ from ..ui.draw import (
     ensure_handlers_enabled,
     refresh_all_handlers,
     enable_limitation_plane,
-    disable_limitation_plane
+    disable_limitation_plane,
+    enable_brush_circle,
+    disable_brush_circle,
 )
 
 # ===== STATE MANAGEMENT =====
@@ -46,7 +48,9 @@ class CursorBBoxState:
         self.limitation_plane_matrix = None
         # Snap targets preview when in point mode with snap: vertices, edges, face_center, snap_mode
         self.snap_targets_preview = None
-        
+        # 2D brush circle while LMB-drag marking: {'center', 'radius', 'remove'}
+        self.brush_circle = None
+
     def cleanup(self):
         """Clean up all state and handlers"""
         self.disable_all_handlers()
@@ -1298,3 +1302,28 @@ def disable_limitation_plane_wrapper(context):
     if 'limitation_plane' in _state.handlers:
         disable_limitation_plane(_state)
     _state.limitation_plane_matrix = None
+
+
+def enable_brush_circle_wrapper():
+    """Register the POST_PIXEL brush-circle handler (idempotent)."""
+    global _state
+    enable_brush_circle(_state)
+
+
+def disable_brush_circle_wrapper():
+    """Remove the brush-circle handler and hide the circle."""
+    global _state
+    disable_brush_circle(_state)
+
+
+def update_brush_circle(center, radius, remove=False):
+    """Show the brush circle at region coords *center* with *radius* px."""
+    global _state
+    _state.brush_circle = {'center': tuple(center), 'radius': float(radius),
+                           'remove': bool(remove)}
+
+
+def clear_brush_circle():
+    """Hide the brush circle without removing its handler."""
+    global _state
+    _state.brush_circle = None
