@@ -173,6 +173,7 @@ class CursorBBox_PT_main(bpy.types.Panel):
 
             sub.prop(coacd_u, "threshold")
             sub.prop(coacd_u, "max_convex_hull")
+            sub.prop(coacd_u, "approximate_mode")
 
             sub.separator(factor=0.5)
             sub.label(text="Preprocessing", icon='MODIFIER')
@@ -190,6 +191,9 @@ class CursorBBox_PT_main(bpy.types.Panel):
             sub.label(text="Advanced", icon='PREFERENCES')
             sub.prop(coacd_u, "resolution")
             sub.prop(coacd_u, "merge")
+            sub.prop(coacd_u, "extrude")
+            if coacd_u.extrude:
+                sub.prop(coacd_u, "extrude_margin")
             sub.prop(coacd_u, "seed")
 
             sub.separator(factor=0.5)

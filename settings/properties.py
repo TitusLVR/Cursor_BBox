@@ -262,6 +262,15 @@ class CursorBBox_CoACDUSettings(bpy.types.PropertyGroup):
         description="Maximum convex hulls in result (-1 = no limit, requires merge)",
         default=-1, min=-1, max=2048,
     )
+    approximate_mode: EnumProperty(
+        name="Approximation",
+        description="Approximation shape type",
+        items=[
+            ('ch', "Convex Hulls", "Use convex hulls for approximation"),
+            ('box', "Boxes", "Use axis-aligned boxes instead of hulls (flat faces, no rounding)"),
+        ],
+        default='ch',
+    )
 
     # Preprocessing
     preprocess_mode: EnumProperty(
@@ -312,6 +321,22 @@ class CursorBBox_CoACDUSettings(bpy.types.PropertyGroup):
         name="Merge",
         description="Enable merge post-processing to reduce hull count",
         default=True,
+    )
+    # NOTE: the library also accepts decimate/max_ch_vertex, but in coacd_u
+    # DecimateCH is effectively a no-op (removes 1-2 verts), so it is not exposed.
+    extrude: BoolProperty(
+        name="Extrude",
+        description=(
+            "Grow neighbouring hulls into each other along their shared faces "
+            "(closes seams between parts). Only affects faces where two hulls touch; "
+            "a single hull or outer faces are unchanged"
+        ),
+        default=False,
+    )
+    extrude_margin: FloatProperty(
+        name="Extrude Margin",
+        description="Extrude margin distance",
+        default=0.01, min=0.0, max=1.0, precision=4,
     )
     seed: IntProperty(
         name="Seed",

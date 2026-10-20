@@ -86,6 +86,9 @@ parts = coacd.run_coacd(
     mcts_max_depth=params["mcts_max_depth"],
     pca=params["pca"],
     merge=params["merge"],
+    extrude=params["extrude"],
+    extrude_margin=params["extrude_margin"],
+    apx_mode=params["apx_mode"],
     seed=params["seed"],
 )
 
@@ -332,6 +335,9 @@ class CursorBBox_OT_collision_coacd_u(bpy.types.Operator):
             'mcts_max_depth': pg.mcts_max_depth,
             'pca': pg.pca,
             'merge': pg.merge,
+            'extrude': pg.extrude,
+            'extrude_margin': pg.extrude_margin,
+            'apx_mode': pg.approximate_mode,
             'seed': pg.seed,
         }
         with open(params_path, 'w') as f:
