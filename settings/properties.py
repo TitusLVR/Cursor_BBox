@@ -401,6 +401,13 @@ def register():
         subtype='PIXEL',
     )
 
+    bpy.types.Scene.cursor_bbox_brush_through = bpy.props.BoolProperty(
+        name="Brush Through",
+        description="Face-marking brush marks every face under the circle, "
+                    "including back faces and faces hidden behind other geometry",
+        default=False,
+    )
+
     bpy.types.Scene.cursor_bbox_name_box = bpy.props.StringProperty(
         name="Box Name",
         description="Name pattern for Box objects",
@@ -542,6 +549,7 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_select_coplanar
     del bpy.types.Scene.cursor_bbox_coplanar_angle
     del bpy.types.Scene.cursor_bbox_brush_radius
+    del bpy.types.Scene.cursor_bbox_brush_through
     del bpy.types.Scene.cursor_bbox_name_box
     del bpy.types.Scene.cursor_bbox_name_hull
     del bpy.types.Scene.cursor_bbox_name_sphere

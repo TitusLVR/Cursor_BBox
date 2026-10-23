@@ -27,6 +27,7 @@ Use:
 from __future__ import annotations
 
 import bpy
+import weakref
 
 from .overlay import HUDOverlay
 from .help import HelpOverlay
@@ -36,6 +37,21 @@ from ..hud_draw.handlers import safe_handler_add, safe_handler_remove
 
 
 class HUDController:
+    # Controllers whose draw handler is currently registered. Lets the addon
+    # drop overlays left behind by a modal that crashed or was running when
+    # the addon got reloaded (see ``detach_all``).
+    _live: "weakref.WeakSet[HUDController]" = weakref.WeakSet()
+
+    @classmethod
+    def detach_all(cls) -> None:
+        """Remove every registered HUD draw handler (addon unregister)."""
+        for ctl in list(cls._live):
+            try:
+                ctl.detach(None)
+            except Exception as e:
+                print(f"CursorBBox: HUD detach failed: {e}")
+        cls._live.clear()
+
     def __init__(self, operator_name: str, title: str = ""):
         self.hud = HUDOverlay(operator_name)
         if title:
@@ -55,6 +71,7 @@ class HUDController:
         self._handle = safe_handler_add(
             bpy.types.SpaceView3D, self._draw_cb, (),
             'WINDOW', 'POST_PIXEL', tick=True)
+        HUDController._live.add(self)
 
     def _draw_cb(self) -> None:
         # Use the live bpy.context inside the draw handler — the context
@@ -93,5 +110,6 @@ class HUDController:
             return
         safe_handler_remove(self._handle, bpy.types.SpaceView3D, 'WINDOW')
         self._handle = None
+        HUDController._live.discard(self)
         if context is not None and context.area is not None:
             context.area.tag_redraw()

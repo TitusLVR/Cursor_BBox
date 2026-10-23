@@ -170,5 +170,124 @@ class ClassifyEdgesTests(unittest.TestCase):
         self.assertEqual(nonmanifold, {frozenset((0, 1))})
 
 
+class ExportUnitsTests(unittest.TestCase):
+    """The engine validates the exported .obj, which is written at
+    EXPORT_SCALE x Blender units (1 Blender cm = 1 game metre). Checking in
+    Blender metres against the engine's 1e-3 tolerance lets dents up to 1 mm
+    through that the engine then rejects."""
+
+    def test_scale_is_one_blender_cm_per_engine_metre(self):
+        self.assertEqual(cg.EXPORT_SCALE, 100.0)
+        self.assertEqual(cg.to_export_units([(0.01, 0.0, -0.02)]), [(1.0, 0.0, -2.0)])
+
+    def test_half_millimetre_dent_is_only_caught_in_export_units(self):
+        # Cube with one top corner pushed 0.5 mm down: the two top triangles
+        # are no longer coplanar, so one of them sees the sunken corner as
+        # outside. In Blender metres that is 5e-4 < 1e-3 and passes; in
+        # export units it is 0.05 and fails, as it does in the engine.
+        verts = list(CUBE_VERTS)
+        verts[6] = (1, 1, 1 - 5e-4)
+        self.assertEqual(cg.violating_faces(verts, CUBE_TRIS, TOL), set())
+        self.assertNotEqual(
+            cg.violating_faces(cg.to_export_units(verts), CUBE_TRIS, TOL), set())
+
+    def test_hull_of_thin_plate_passes_engine_check_in_export_units(self):
+        # ConvexHull.450 from creche_02.blend (world space, Blender metres):
+        # bmesh.ops.convex_hull folded this plate by 9 m. Our hull, built and
+        # validated in export units, must pass the engine's tolerance there.
+        import json
+        data = os.path.join(os.path.dirname(__file__), "data_convexhull_450.json")
+        with open(data) as fh:
+            pts = cg.to_export_units(tuple(p) for p in json.load(fh))
+        tris = cg.convex_hull_triangles(pts, tolerance=TOL)
+        self.assertTrue(tris)
+        self.assertEqual(cg.violating_faces(pts, tris, TOL), set())
+        boundary, nonmanifold = cg.classify_edges(tris)
+        self.assertEqual((boundary, nonmanifold), (set(), set()))
+
+
+def _wedge(height, top, shift):
+    """Closed lopsided box (v=8 f=12, like the hulls the engine rejects for
+    centroid mismatch): base 2x2 on z=0, square top of side ``top`` at
+    ``height``, pushed sideways by ``shift``."""
+    t = top / 2.0
+    verts = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0),
+             (-t + shift, -t, height), (t + shift, -t, height),
+             (t + shift, t, height), (-t + shift, t, height)]
+    tris = [[0, 2, 1], [0, 3, 2], [4, 5, 6], [4, 6, 7],
+            [0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+            [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]]
+    return verts, tris
+
+
+def _pyramid(height):
+    """Closed square pyramid, base 2x2 on z=0, apex at (0, 0, height)."""
+    verts = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0), (0, 0, height)]
+    tris = [[0, 2, 1], [0, 3, 2], [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]]
+    return verts, tris
+
+
+class CentroidTests(unittest.TestCase):
+    def test_cube_centroids_coincide(self):
+        percent, volume = cg.centroid_mismatch_percent(CUBE_VERTS, CUBE_TRIS)
+        self.assertAlmostEqual(percent, 0.0, places=9)
+        self.assertAlmostEqual(volume, 1.0, places=9)
+
+    def test_wedge_fails_only_the_centroid_check(self):
+        verts, tris = _wedge(1.0, 0.2, 0.8)
+        percent, _ = cg.centroid_mismatch_percent(verts, tris)
+        self.assertGreater(percent, cg.MAX_CENTROID_MISMATCH_PERCENT)
+        self.assertEqual(cg.piece_issue_kinds(verts, tris, TOL), {"Centroid"})
+
+    def test_inside_out_cube_kinds(self):
+        flipped = [[a, c, b] for a, b, c in CUBE_TRIS]
+        self.assertEqual(cg.piece_issue_kinds(CUBE_VERTS, flipped, TOL), {"Convex", "Volume"})
+
+
+class SplitLopsidedTests(unittest.TestCase):
+    def _assert_exact_split(self, verts, tris, pieces):
+        for i, (v, t) in enumerate(pieces):
+            self.assertEqual(cg.piece_issue_kinds(v, t, TOL), set(), f"piece {i}")
+        total = sum(cg.centroid_mismatch_percent(v, t)[1] for v, t in pieces)
+        self.assertAlmostEqual(total, cg.centroid_mismatch_percent(verts, tris)[1], places=9)
+
+    def test_clip_cube_in_half(self):
+        front, back = cg.clip_convex_piece(CUBE_VERTS, CUBE_TRIS, (0.5, 0.0, 0.0), (1.0, 0.0, 0.0))
+        for v, t in (front, back):
+            self.assertEqual(cg.piece_issue_kinds(v, t, TOL), set())
+            self.assertAlmostEqual(cg.centroid_mismatch_percent(v, t)[1], 0.5, places=9)
+
+    def test_clip_through_vertices_stays_closed(self):
+        front, back = cg.clip_convex_piece(CUBE_VERTS, CUBE_TRIS, (0.0, 0.0, 0.0), (1.0, -1.0, 0.0))
+        self._assert_exact_split(CUBE_VERTS, CUBE_TRIS, [front, back])
+
+    def test_wedge_is_split_into_passing_pieces(self):
+        verts, tris = _wedge(1.0, 0.2, 0.8)
+        pieces = cg.split_lopsided(verts, tris, TOL)
+        self.assertIsNotNone(pieces)
+        self.assertGreaterEqual(len(pieces), 2)
+        self.assertLessEqual(len(pieces), cg.MAX_SPLIT_PIECES)
+        self._assert_exact_split(verts, tris, pieces)
+
+    def test_wedge_in_export_units_splits_the_same(self):
+        verts, tris = _wedge(1.0, 0.2, 0.8)
+        pieces = cg.split_lopsided(cg.to_export_units(verts), tris, TOL)
+        self.assertIsNotNone(pieces)
+        self._assert_exact_split(cg.to_export_units(verts), tris, pieces)
+
+    def test_passing_piece_is_returned_whole(self):
+        pieces = cg.split_lopsided(CUBE_VERTS, CUBE_TRIS, TOL)
+        self.assertEqual(len(pieces), 1)
+
+    def test_sharp_pyramid_cannot_be_split(self):
+        verts, tris = _pyramid(10.0)
+        self.assertEqual(cg.piece_issue_kinds(verts, tris, TOL), {"Centroid"})
+        self.assertIsNone(cg.split_lopsided(verts, tris, TOL))
+
+    def test_other_issues_are_not_split_away(self):
+        flipped = [[a, c, b] for a, b, c in CUBE_TRIS]
+        self.assertIsNone(cg.split_lopsided(CUBE_VERTS, flipped, TOL))
+
+
 if __name__ == "__main__":
     unittest.main()

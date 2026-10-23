@@ -260,6 +260,18 @@ def register():
 def unregister():
     from .functions import async_subprocess
     async_subprocess.cancel_all()
+    # Drop draw handlers of any modal still running (or crashed) so a
+    # reload does not leave stale overlays in the viewport.
+    try:
+        from .functions.core import cleanup_addon_state
+        cleanup_addon_state()
+    except Exception as e:
+        print(f"CursorBBox: core cleanup failed: {e}")
+    try:
+        from .ui.hud.controller import HUDController
+        HUDController.detach_all()
+    except Exception as e:
+        print(f"CursorBBox: HUD cleanup failed: {e}")
     unregister_keymap()
     properties.unregister()
     for cls in reversed(classes):

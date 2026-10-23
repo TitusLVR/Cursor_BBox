@@ -5,11 +5,45 @@ outside Blender. It reuses ``collision_mesh_geometry`` as the single source of
 truth for what counts as valid collision geometry: ``violating_faces`` mirrors
 ``check_convex`` (reporting every offending face, not just the worst), and
 ``classify_edges`` mirrors ``check_watertight``'s edge definition (returning edge
-identities, not just counts).
+identities, not just counts), and ``centroid_mismatch_percent`` is the engine's
+centroid-sanity metric computed with the package's own functions.
+
+The centroid check is the one policy failure a hull rebuild cannot cure: a
+closed convex piece whose surface-area centroid and volume centroid sit more
+than ``MAX_CENTROID_MISMATCH_PERCENT`` of its extent apart (wedge, cone, long
+taper). ``split_lopsided`` fixes it without changing the collision shape by
+cutting the piece with planes into squatter convex pieces whose union is the
+original. A sharp tip (cone, spike) is self-similar and stays lopsided however
+small it gets, so such pieces are reported as unsplittable.
 """
+import math
 from collections import defaultdict
 
 import collision_mesh_geometry as cmg
+from collision_mesh_geometry import validate_obj as _validate_obj
+
+MAX_CENTROID_MISMATCH_PERCENT = _validate_obj.MAX_CENTROID_MISMATCH_PERCENT
+MIN_POSITIVE_VOLUME = _validate_obj.MIN_POSITIVE_VOLUME
+# Upper bound on the pieces one lopsided hull may be split into. Halving a
+# tapered piece roughly halves its lopsidedness, so 2-4 pieces cover real
+# content; a piece that still fails after this many has a sharp tip.
+MAX_SPLIT_PIECES = 8
+# Relative distance (to the piece's extent) within which a vertex counts as
+# lying on a cutting plane.
+_PLANE_EPS = 1e-7
+
+# The collision .obj is written at this many engine units per Blender unit
+# (1 Blender cm = 1 game metre), and the engine's CONVEXITY_TOLERANCE applies
+# to those exported numbers. Every policy check and hull build here therefore
+# runs on export-scaled coordinates; checking in Blender metres would let
+# dents up to 100x the tolerance through.
+EXPORT_SCALE = 100.0
+
+
+def to_export_units(points):
+    """``points`` (Blender units) scaled to the exported .obj's units."""
+    return [(p[0] * EXPORT_SCALE, p[1] * EXPORT_SCALE, p[2] * EXPORT_SCALE)
+            for p in points]
 
 
 def violating_faces(vertices, triangles, tolerance):
@@ -281,3 +315,212 @@ def classify_edges(triangles):
     boundary = {edge for edge, count in edge_count.items() if count == 1}
     nonmanifold = {edge for edge, count in edge_count.items() if count > 2}
     return boundary, nonmanifold
+
+
+# ---------------------------------------------------------------------------
+# Centroid sanity and lopsided-piece splitting
+# ---------------------------------------------------------------------------
+
+def centroid_mismatch_percent(vertices, triangles):
+    """``(percent, signed_volume)``: the engine's centroid-sanity metric, i.e.
+    the distance between the surface-area centroid and the volume centroid as
+    a percentage of the largest bounding-box side (``validate_mesh``)."""
+    area_c = cmg.surface_area_centroid(vertices, triangles)
+    vol_c, volume = cmg.volume_centroid(vertices, triangles)
+    diff = cmg.point_distance(area_c, vol_c)
+    return cmg.distance_as_extent_percent(diff, cmg.mesh_extent(vertices)), volume
+
+
+def piece_issue_kinds(vertices, triangles, tolerance):
+    """Names of the engine policy checks the piece fails, as a set drawn from
+    ``{"Degenerate", "Watertight", "Manifold", "Convex", "Volume",
+    "Centroid"}``; empty when the piece passes everything."""
+    kinds = set()
+    if any(cmg.triangle_is_degenerate(vertices[a], vertices[b], vertices[c])
+           for a, b, c in triangles):
+        kinds.add("Degenerate")
+    boundary, nonmanifold = classify_edges(triangles)
+    if boundary:
+        kinds.add("Watertight")
+    if nonmanifold:
+        kinds.add("Manifold")
+    if violating_faces(vertices, triangles, tolerance):
+        kinds.add("Convex")
+    percent, volume = centroid_mismatch_percent(vertices, triangles)
+    if volume <= MIN_POSITIVE_VOLUME:
+        kinds.add("Volume")
+    if percent > MAX_CENTROID_MISMATCH_PERCENT:
+        kinds.add("Centroid")
+    return kinds
+
+
+def _normalized(v):
+    length = math.sqrt(_dot(v, v))
+    if length < 1e-15:
+        return None
+    return (v[0] / length, v[1] / length, v[2] / length)
+
+
+def centroid_split_plane(vertices, triangles):
+    """``(point, normal)`` of the plane that halves the piece along the
+    direction in which its surface and volume centroids disagree (falling
+    back to the longest bounding-box axis when they coincide)."""
+    area_c = cmg.surface_area_centroid(vertices, triangles)
+    vol_c, _ = cmg.volume_centroid(vertices, triangles)
+    normal = _normalized(_sub(area_c, vol_c))
+    if normal is None:
+        axis = max(range(3), key=lambda k: max(v[k] for v in vertices) - min(v[k] for v in vertices))
+        normal = tuple(1.0 if k == axis else 0.0 for k in range(3))
+    heights = [_dot(v, normal) for v in vertices]
+    mid = (min(heights) + max(heights)) * 0.5
+    return (normal[0] * mid, normal[1] * mid, normal[2] * mid), normal
+
+
+def clip_convex_piece(vertices, triangles, point, normal):
+    """Cut a closed convex triangle mesh with a plane.
+
+    Returns ``(front, back)``, each ``(vertices, triangles)`` closed and
+    convex, or ``None`` in place of a side that has no volume. Triangles are
+    clipped against the plane and each side is capped with the (convex)
+    section polygon, so the two parts are exactly the original solid. The cap
+    is triangulated around its centre point: a fan from a corner would make
+    zero-area triangles out of section points lying on one edge (where a face
+    diagonal crossed the plane), and dropping those points would leave
+    T-junctions with the side faces.
+    """
+    normal = _normalized(normal)
+    extent = cmg.mesh_extent(vertices)
+    eps = _PLANE_EPS * (extent if extent > 0 else 1.0)
+    dist = [_dot(_sub(v, point), normal) for v in vertices]
+    crossings = {}
+
+    def intersection(i, j):
+        key = (i, j) if i < j else (j, i)
+        if key not in crossings:
+            a, b = vertices[key[0]], vertices[key[1]]
+            t = dist[key[0]] / (dist[key[0]] - dist[key[1]])
+            crossings[key] = tuple(a[k] + (b[k] - a[k]) * t for k in range(3))
+        return key
+
+    sides = []
+    for sign in (1.0, -1.0):
+        side_verts = []
+        index_of = {}
+
+        def local(key, co):
+            if key not in index_of:
+                # Weld onto an existing point when coincident, so the shell
+                # never gets two vertices at one place.
+                for li, other in enumerate(side_verts):
+                    if _dot(_sub(co, other), _sub(co, other)) <= eps * eps:
+                        index_of[key] = li
+                        break
+                else:
+                    index_of[key] = len(side_verts)
+                    side_verts.append(co)
+            return index_of[key]
+
+        side_faces = []
+        on_plane_keys = set()
+        for tri in triangles:
+            if all(abs(dist[i]) <= eps for i in tri):
+                continue  # lies in the plane: not part of either solid's shell
+            poly = []
+            for e in range(3):
+                p, q = tri[e], tri[(e + 1) % 3]
+                dp, dq = dist[p] * sign, dist[q] * sign
+                if dp >= -eps:
+                    poly.append(("v", p))
+                if (dp > eps and dq < -eps) or (dp < -eps and dq > eps):
+                    poly.append(("e", intersection(p, q)))
+            if len(poly) < 3:
+                continue
+            idx = []
+            for kind, key in poly:
+                co = tuple(vertices[key]) if kind == "v" else crossings[key]
+                li = local((kind, key), co)
+                if not idx or idx[-1] != li:
+                    idx.append(li)
+                if kind == "e" or abs(dist[key]) <= eps:
+                    on_plane_keys.add((kind, key))
+            if idx[0] == idx[-1]:
+                idx.pop()
+            for k in range(1, len(idx) - 1):
+                side_faces.append([idx[0], idx[k], idx[k + 1]])
+
+        cap = _section_polygon([index_of[k] for k in on_plane_keys], side_verts, normal)
+        if len(cap) >= 3:
+            if sign > 0:
+                cap.reverse()  # front cap faces -normal, out of the front piece
+            centre = tuple(sum(side_verts[i][k] for i in cap) / len(cap) for k in range(3))
+            ci = len(side_verts)
+            side_verts.append(centre)
+            for k in range(len(cap)):
+                side_faces.append([ci, cap[k], cap[(k + 1) % len(cap)]])
+
+        if side_faces:
+            compact_v, compact_f = _compact(side_verts, side_faces)
+            _, volume = cmg.volume_centroid(compact_v, compact_f)
+            if volume > MIN_POSITIVE_VOLUME:
+                sides.append((compact_v, compact_f))
+                continue
+        sides.append(None)
+    return sides[0], sides[1]
+
+
+def _section_polygon(indices, verts, normal):
+    """Section points ordered counter-clockwise seen from ``+normal``. The
+    section of a convex solid is convex, so sorting by angle around the
+    points' centre is enough."""
+    unique = list(set(indices))
+    if len(unique) < 3:
+        return unique
+    centre = tuple(sum(verts[i][k] for i in unique) / len(unique) for k in range(3))
+    helper = (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
+    u = _normalized(_cross(normal, helper))
+    v = _cross(normal, u)
+    unique.sort(key=lambda i: math.atan2(_dot(_sub(verts[i], centre), v),
+                                         _dot(_sub(verts[i], centre), u)))
+    return unique
+
+
+def _compact(vertices, triangles):
+    """Drop unused vertices and renumber triangles."""
+    index_map = {}
+    used = []
+    remapped = []
+    for tri in triangles:
+        local = []
+        for i in tri:
+            if i not in index_map:
+                index_map[i] = len(used)
+                used.append(vertices[i])
+            local.append(index_map[i])
+        remapped.append(local)
+    return used, remapped
+
+
+def split_lopsided(vertices, triangles, tolerance, max_pieces=MAX_SPLIT_PIECES):
+    """Split a convex piece that fails only the Centroid check into pieces
+    that pass every engine check. Returns ``[(vertices, triangles), ...]``
+    (the input itself when it already passes), or ``None`` when the piece has
+    other issues, or still fails after ``max_pieces`` pieces (a sharp tip)."""
+    todo = [([tuple(v) for v in vertices], [list(t) for t in triangles])]
+    done = []
+    while todo:
+        piece_v, piece_t = todo.pop()
+        kinds = piece_issue_kinds(piece_v, piece_t, tolerance)
+        if not kinds:
+            done.append((piece_v, piece_t))
+            continue
+        if kinds != {"Centroid"}:
+            return None
+        if len(done) + len(todo) + 2 > max_pieces:
+            return None
+        point, normal = centroid_split_plane(piece_v, piece_t)
+        front, back = clip_convex_piece(piece_v, piece_t, point, normal)
+        if front is None or back is None:
+            return None
+        todo.append(front)
+        todo.append(back)
+    return done

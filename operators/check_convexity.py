@@ -4,6 +4,7 @@ from collections import namedtuple
 
 import bpy
 import bmesh
+from mathutils import Vector
 
 # collision_mesh_geometry ships in s:\packages, which is not always on
 # PYTHONPATH (e.g. a fresh Blender launch). If the first import fails, add that
@@ -15,9 +16,12 @@ def _import_geometry():
     import collision_mesh_geometry as cmg
     from collision_mesh_geometry import validate_obj
     from ..functions.convexity_geometry import (
-        violating_faces, classify_edges, convex_hull_triangles,
+        violating_faces, classify_edges, convex_hull_triangles, EXPORT_SCALE,
+        centroid_mismatch_percent, split_lopsided,
     )
-    return cmg, validate_obj, violating_faces, classify_edges, convex_hull_triangles
+    return (cmg, validate_obj, violating_faces, classify_edges,
+            convex_hull_triangles, EXPORT_SCALE,
+            centroid_mismatch_percent, split_lopsided)
 
 
 cmg = None
@@ -25,6 +29,9 @@ validate_obj = None
 violating_faces = None
 classify_edges = None
 convex_hull_triangles = None
+EXPORT_SCALE = 100.0
+centroid_mismatch_percent = None
+split_lopsided = None
 GEOMETRY_AVAILABLE = False
 
 
@@ -36,19 +43,22 @@ def ensure_geometry():
     operators call this again at execute time.
     """
     global cmg, validate_obj, violating_faces, classify_edges
-    global convex_hull_triangles, GEOMETRY_AVAILABLE
+    global convex_hull_triangles, EXPORT_SCALE, GEOMETRY_AVAILABLE
+    global centroid_mismatch_percent, split_lopsided
     if GEOMETRY_AVAILABLE:
         return True
     try:
         (cmg, validate_obj, violating_faces, classify_edges,
-         convex_hull_triangles) = _import_geometry()
+         convex_hull_triangles, EXPORT_SCALE,
+         centroid_mismatch_percent, split_lopsided) = _import_geometry()
         GEOMETRY_AVAILABLE = True
     except ImportError:
         if os.path.isdir(_PACKAGES_FALLBACK) and _PACKAGES_FALLBACK not in sys.path:
             sys.path.append(_PACKAGES_FALLBACK)
         try:
             (cmg, validate_obj, violating_faces, classify_edges,
-             convex_hull_triangles) = _import_geometry()
+             convex_hull_triangles, EXPORT_SCALE,
+             centroid_mismatch_percent, split_lopsided) = _import_geometry()
             GEOMETRY_AVAILABLE = True
         except ImportError:
             GEOMETRY_AVAILABLE = False
@@ -60,6 +70,23 @@ ensure_geometry()
 GEOMETRY_IMPORT_ERROR = (
     "collision_mesh_geometry is not importable - ensure s:\\packages is on PYTHONPATH"
 )
+
+def _export_coord(co, matrix_world):
+    """One vertex as the collision .obj exporter writes it: ``matrix_world @
+    co`` scaled by EXPORT_SCALE in float32 (mathutils), then 6 decimals.
+
+    The exact float path matters. ``bm.transform`` or a float64 scale rounds
+    differently by ~3e-5 export units on a 6 m asset, and a hull's sliver
+    triangles amplify that noise a thousandfold, so a hull validated on one
+    path can fail the engine's check on the exported numbers."""
+    x, y, z = (matrix_world @ co) * EXPORT_SCALE
+    return (round(x, 6), round(y, 6), round(z, 6))
+
+
+def _export_coords(bm, matrix_world):
+    """``bm``'s vertices in export units, see ``_export_coord``."""
+    return [_export_coord(v.co, matrix_world) for v in bm.verts]
+
 
 ConvexityResult = namedtuple(
     "ConvexityResult",
@@ -74,23 +101,33 @@ ConvexityResult = namedtuple(
         "nonmanifold_count",
         "boundary_edges",
         "nonmanifold_edges",
+        "centroid_percent",
     ],
 )
 
 
 def _clean_result(total_faces):
     return ConvexityResult(
-        True, total_faces, set(), set(), 0.0, -1, 0, 0, set(), set()
+        True, total_faces, set(), set(), 0.0, -1, 0, 0, set(), set(), 0.0
     )
+
+
+def _centroid_off(verts, tris):
+    """``(percent, failed)``: the engine's centroid-sanity metric for the piece
+    and whether it exceeds ``MAX_CENTROID_MISMATCH_PERCENT``."""
+    percent, _ = centroid_mismatch_percent(verts, tris)
+    return percent, percent > validate_obj.MAX_CENTROID_MISMATCH_PERCENT
 
 
 def check_mesh_convexity(mesh_obj):
     """Validate a mesh object against the collision_mesh_geometry policy.
 
-    Triangulates internally, extracts world-space vertices/triangles, and uses
-    the package as the single source of truth: ``check_convex`` for the worst
-    violation, ``check_watertight`` for boundary/non-manifold counts, and
-    ``triangle_is_degenerate`` for zero-area triangles. The pure helpers
+    Triangulates internally, extracts vertices/triangles in export units the
+    way the exporter computes them (see ``_export_coords``), and uses the
+    package as the single source of truth: ``check_convex`` for the worst
+    violation, ``check_watertight`` for boundary/non-manifold counts,
+    ``triangle_is_degenerate`` for zero-area triangles, and the surface/volume
+    centroid distance for the centroid-sanity check. The pure helpers
     ``violating_faces`` / ``classify_edges`` provide per-element identities for
     edit-mode selection. Triangle indices are mapped back to original polygon
     indices, and edge identities use original vertex indices (triangulation adds
@@ -102,7 +139,6 @@ def check_mesh_convexity(mesh_obj):
     bm = bmesh.new()
     try:
         bm.from_mesh(mesh)
-        bm.transform(mesh_obj.matrix_world)
         bm.verts.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
 
@@ -118,7 +154,7 @@ def check_mesh_convexity(mesh_obj):
         bm.faces.ensure_lookup_table()
         bm.verts.index_update()
 
-        verts = [(v.co.x, v.co.y, v.co.z) for v in bm.verts]
+        verts = _export_coords(bm, mesh_obj.matrix_world)
         tris = [[v.index for v in f.verts] for f in bm.faces]
 
         tolerance = validate_obj.CONVEXITY_TOLERANCE
@@ -144,11 +180,14 @@ def check_mesh_convexity(mesh_obj):
         invalid_orig = {orig_polygon(i) for i in violating_faces(verts, tris, tolerance)}
         invalid_orig -= degenerate_orig
 
+        centroid_percent, centroid_failed = _centroid_off(verts, tris)
+
         is_clean = (
             not invalid_orig
             and not degenerate_orig
             and boundary_count == 0
             and nonmanifold_count == 0
+            and not centroid_failed
         )
 
         return ConvexityResult(
@@ -162,30 +201,33 @@ def check_mesh_convexity(mesh_obj):
             nonmanifold_count,
             boundary_edges,
             nonmanifold_edges,
+            centroid_percent,
         )
     finally:
         bm.free()
 
 
-def _build_convex_hull_bmesh(world_coords):
-    """Return a triangulated convex-hull bmesh from world-space coords.
+def _build_convex_hull_bmesh(local_coords, matrix_world):
+    """Return a triangulated convex-hull bmesh over ``local_coords`` (object
+    space), the hull itself built and validated in export units.
 
     Builds the hull with the double-precision quickhull in
     ``convexity_geometry`` (Blender's ``bmesh.ops.convex_hull`` merges nearly
-    coplanar faces with a cloud-relative tolerance and its output can fail the
-    collision_mesh_geometry convexity check by several millimetres). Falls
-    back to the Blender operator if quickhull fails. Does NOT recenter, so a
-    caller writing the result back through an object's inverse matrix keeps the
-    object's origin and transform. Returns the bmesh, or None when there are
-    fewer than 4 points or the hull has no solid faces (coplanar/collinear
-    input). The caller owns (must free) a returned bmesh.
+    coplanar faces with a cloud-relative tolerance and on thin plates can fold
+    the shell by metres). Falls back to the Blender operator if quickhull
+    fails. The hull vertices keep their exact local coordinates: the engine
+    validates what the exporter writes from these very floats, and moving them
+    through a world/inverse round trip adds float32 noise that a sliver
+    triangle amplifies past the tolerance. Returns the bmesh, or None when
+    there are fewer than 4 points or the hull has no solid faces
+    (coplanar/collinear input). The caller owns (must free) a returned bmesh.
     """
-    if len(world_coords) < 4:
+    if len(local_coords) < 4:
         return None
 
     try:
         tris = convex_hull_triangles(
-            [(c.x, c.y, c.z) for c in world_coords],
+            [_export_coord(co, matrix_world) for co in local_coords],
             tolerance=validate_obj.CONVEXITY_TOLERANCE,
         )
     except Exception:
@@ -194,7 +236,7 @@ def _build_convex_hull_bmesh(world_coords):
         bm = bmesh.new()
         try:
             remap = {
-                i: bm.verts.new(world_coords[i])
+                i: bm.verts.new(local_coords[i])
                 for i in sorted({i for tri in tris for i in tri})
             }
             for tri in tris:
@@ -207,7 +249,7 @@ def _build_convex_hull_bmesh(world_coords):
             bm.free()
 
     bm = bmesh.new()
-    for co in world_coords:
+    for co in local_coords:
         bm.verts.new(co)
     bm.verts.ensure_lookup_table()
     ret = bmesh.ops.convex_hull(bm, input=bm.verts)
@@ -226,19 +268,24 @@ def _build_convex_hull_bmesh(world_coords):
 
 
 PolicyCounts = namedtuple(
-    "PolicyCounts", ["violations", "degenerate", "boundary", "nonmanifold"]
+    "PolicyCounts", ["violations", "degenerate", "boundary", "nonmanifold", "centroid"]
 )
 PolicyCounts.total = property(lambda self: sum(self))
+# Everything a convex-hull rebuild can cure; the centroid check is not among
+# them (a closed convex hull rebuilt from the same vertices is the same hull).
+PolicyCounts.structural = property(lambda self: sum(self) - self.centroid)
 
-_CLEAN_COUNTS = PolicyCounts(0, 0, 0, 0)
+_CLEAN_COUNTS = PolicyCounts(0, 0, 0, 0, 0)
 
 
-def _evaluate_policy(bm, tolerance):
-    """Evaluate the full collision-mesh policy for the current bmesh geometry.
+def _evaluate_policy(bm, tolerance, matrix_world):
+    """Evaluate the full collision-mesh policy for the current bmesh geometry
+    (object space; ``matrix_world`` maps it to the exported coordinates).
 
     Triangulates a throwaway copy (so the live bmesh is untouched) and runs the
-    same four tests as ``check_mesh_convexity``: convexity violations,
-    degenerate triangles, boundary edges, and non-manifold edges. Returns
+    same tests as ``check_mesh_convexity`` in export units: convexity
+    violations, degenerate triangles, boundary edges, non-manifold edges, and
+    the centroid-sanity check (1 when failed). Returns
     ``(triangle_count, PolicyCounts)``.
     """
     eval_bm = bm.copy()
@@ -246,7 +293,7 @@ def _evaluate_policy(bm, tolerance):
         bmesh.ops.triangulate(eval_bm, faces=eval_bm.faces[:])
         eval_bm.verts.ensure_lookup_table()
         eval_bm.verts.index_update()
-        verts = [(v.co.x, v.co.y, v.co.z) for v in eval_bm.verts]
+        verts = _export_coords(eval_bm, matrix_world)
         tris = [[v.index for v in f.verts] for f in eval_bm.faces]
         violations = len(violating_faces(verts, tris, tolerance))
         degenerate = sum(
@@ -254,9 +301,59 @@ def _evaluate_policy(bm, tolerance):
             if cmg.triangle_is_degenerate(verts[tri[0]], verts[tri[1]], verts[tri[2]])
         )
         boundary, nonmanifold, _ = cmg.check_watertight(tris)
-        return len(tris), PolicyCounts(violations, degenerate, boundary, nonmanifold)
+        _, centroid_failed = _centroid_off(verts, tris)
+        return len(tris), PolicyCounts(violations, degenerate, boundary, nonmanifold,
+                                       1 if centroid_failed else 0)
     finally:
         eval_bm.free()
+
+
+def _split_lopsided_object(mesh_obj):
+    """Replace a convex piece that fails only the engine's centroid check with
+    two or more squatter convex pieces covering exactly the same volume (see
+    ``convexity_geometry.split_lopsided``). The split runs on the exported
+    coordinates, so a non-uniform object scale is accounted for. ``mesh_obj``
+    keeps its name, transform and custom properties and receives the first
+    piece; the others are copies of it named ``<name>_1``, ``<name>_2``, ...
+    linked to the same collections. Returns the new objects, or None when the
+    piece cannot be split (a sharp tip stays lopsided however small).
+    """
+    mesh = mesh_obj.data
+    world_mat = mesh_obj.matrix_world
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh)
+        bmesh.ops.triangulate(bm, faces=bm.faces[:])
+        bm.verts.ensure_lookup_table()
+        bm.verts.index_update()
+        verts = _export_coords(bm, world_mat)
+        tris = [[v.index for v in f.verts] for f in bm.faces]
+    finally:
+        bm.free()
+
+    pieces = split_lopsided(verts, tris, validate_obj.CONVEXITY_TOLERANCE)
+    if pieces is None or len(pieces) < 2:
+        return None
+
+    inverse = world_mat.inverted()
+    base_name = mesh_obj.name
+    created = []
+    for index, (piece_verts, piece_tris) in enumerate(pieces):
+        if index == 0:
+            target = mesh_obj
+        else:
+            target = mesh_obj.copy()
+            target.data = mesh_obj.data.copy()
+            target.name = f"{base_name}_{index}"
+            target.data.name = target.name
+            for coll in mesh_obj.users_collection:
+                coll.objects.link(target)
+            created.append(target)
+        local = [tuple(inverse @ (Vector(co) / EXPORT_SCALE)) for co in piece_verts]
+        target.data.clear_geometry()
+        target.data.from_pydata(local, [], piece_tris)
+        target.data.update()
+    return created
 
 
 def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
@@ -269,12 +366,14 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
        near-duplicate verts that create micro-area faces.
     3. Recalculate normals outward to fix any winding inconsistencies
        that cause false convexity violations.
-    4. If the mesh still fails any part of the policy that Check
+    4. If the mesh still fails any structural part of the policy that Check
        Convexity enforces (non-convex faces, degenerate triangles,
        boundary edges, or non-manifold edges) and *rebuild_hull* is
        True, rebuild its convex hull in place (triangulated), which
        guarantees a convex, watertight, manifold result. The object's
-       transform and origin are preserved.
+       transform and origin are preserved, and surviving vertices keep their
+       exact coordinates (everything is evaluated in export units through
+       ``matrix_world`` without ever transforming the geometry).
 
     Returns (degenerate_deleted, verts_welded, normals_fixed,
              remaining: PolicyCounts, hull_rebuilt).
@@ -284,18 +383,23 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
     try:
         bm.from_mesh(mesh)
         world_mat = mesh_obj.matrix_world
-        inv_mat = world_mat.inverted()
-        bm.transform(world_mat)
         bm.verts.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
 
         if len(bm.verts) < 4 or len(bm.faces) == 0:
             return 0, 0, 0, _CLEAN_COUNTS, False
 
+        # Thresholds are given in world units; the geometry stays in object
+        # space, so scale them by the object's transform.
+        scale = world_mat.to_scale()
+        max_scale = max(abs(scale.x), abs(scale.y), abs(scale.z), 1e-12)
+        area_scale = max(abs(scale.x * scale.y), abs(scale.y * scale.z),
+                         abs(scale.x * scale.z), 1e-24)
+
         # --- Pass 1: delete degenerate faces ---
         degen_faces = []
         for face in bm.faces:
-            if face.calc_area() < area_threshold:
+            if face.calc_area() * area_scale < area_threshold:
                 degen_faces.append(face)
             elif face.normal.length_squared < 1e-12:
                 degen_faces.append(face)
@@ -308,7 +412,8 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
         verts_before = len(bm.verts)
         welded = 0
         if weld_distance > 0.0:
-            bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=weld_distance)
+            bmesh.ops.remove_doubles(bm, verts=bm.verts[:],
+                                     dist=weld_distance / max_scale)
             bm.verts.ensure_lookup_table()
             welded = verts_before - len(bm.verts)
 
@@ -316,7 +421,6 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
         bm.faces.ensure_lookup_table()
 
         if len(bm.faces) == 0:
-            bm.transform(inv_mat)
             bm.to_mesh(mesh)
             mesh.update()
             return degen_count, welded, 0, _CLEAN_COUNTS, False
@@ -325,7 +429,7 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
         bm.normal_update()
 
         tolerance = validate_obj.CONVEXITY_TOLERANCE
-        tri_count, counts_before = _evaluate_policy(bm, tolerance)
+        tri_count, counts_before = _evaluate_policy(bm, tolerance, world_mat)
         remaining = counts_before
 
         # If most faces report violations, recalc picked inward winding; flip all
@@ -333,21 +437,20 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
         if counts_before.violations * 2 > tri_count:
             bmesh.ops.reverse_faces(bm, faces=bm.faces[:])
             bm.normal_update()
-            _, remaining = _evaluate_policy(bm, tolerance)
+            _, remaining = _evaluate_policy(bm, tolerance, world_mat)
 
         normals_fixed = max(0, counts_before.violations - remaining.violations)
 
         hull_rebuilt = False
-        if rebuild_hull and remaining.total > 0 and len(bm.verts) >= 4:
-            coords = [v.co.copy() for v in bm.verts]  # world space, post-weld
-            hull_bm = _build_convex_hull_bmesh(coords)
+        if rebuild_hull and remaining.structural > 0 and len(bm.verts) >= 4:
+            coords = [v.co.copy() for v in bm.verts]  # object space, post-weld
+            hull_bm = _build_convex_hull_bmesh(coords, world_mat)
             if hull_bm is not None:
                 bm.free()
                 bm = hull_bm
                 hull_rebuilt = True
-                _, remaining = _evaluate_policy(bm, tolerance)
+                _, remaining = _evaluate_policy(bm, tolerance, world_mat)
 
-        bm.transform(inv_mat)
         bm.to_mesh(mesh)
         mesh.update()
 
@@ -362,10 +465,21 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
     bl_label = "Fix Convexity"
     bl_description = (
         "Delete zero-area faces, weld nearby vertices, recalculate normals, "
-        "and rebuild the convex hull in place when a mesh stays non-convex, "
-        "open, or non-manifold"
+        "rebuild the convex hull in place when a mesh stays non-convex, "
+        "open, or non-manifold, and split pieces that fail the engine's "
+        "centroid check into squatter pieces covering the same volume"
     )
     bl_options = {'REGISTER', 'UNDO'}
+
+    split_lopsided: bpy.props.BoolProperty(
+        name="Split Lopsided",
+        description=(
+            "When a convex piece fails the engine's centroid check (surface and "
+            "volume centres more than 5% of its size apart), cut it into two or "
+            "more convex pieces with exactly the same total shape"
+        ),
+        default=True,
+    )
 
     rebuild_hull: bpy.props.BoolProperty(
         name="Rebuild Hull",
@@ -424,6 +538,9 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
         total_normals = 0
         total_remaining = _CLEAN_COUNTS
         total_hull = 0
+        total_split = 0
+        total_pieces = 0
+        unsplittable = []
         touched_objects = 0
         dirty_objects = []
 
@@ -431,7 +548,21 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
             degen, welded, normals, remaining, rebuilt = fix_invalid_faces(
                 obj, self.area_threshold, self.weld_distance, self.rebuild_hull,
             )
-            if degen + welded + normals + (1 if rebuilt else 0) > 0:
+            split_done = False
+            if self.split_lopsided and remaining.centroid and remaining.structural == 0:
+                created = _split_lopsided_object(obj)
+                if created is None:
+                    unsplittable.append(obj.name)
+                else:
+                    split_done = True
+                    total_split += 1
+                    total_pieces += 1 + len(created)
+                    failing = sum(
+                        1 for piece in [obj] + created
+                        if not check_mesh_convexity(piece).is_clean
+                    )
+                    remaining = PolicyCounts(0, 0, 0, 0, failing)
+            if degen + welded + normals + (1 if rebuilt else 0) + (1 if split_done else 0) > 0:
                 touched_objects += 1
             total_degen += degen
             total_welded += welded
@@ -443,7 +574,7 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
             if remaining.total > 0:
                 dirty_objects.append(obj.name)
 
-        did_work = total_degen + total_welded + total_normals + total_hull
+        did_work = total_degen + total_welded + total_normals + total_hull + total_split
         if did_work == 0 and total_remaining.total == 0:
             self.report({'INFO'}, "All meshes are already clean")
             return {'FINISHED'}
@@ -457,6 +588,8 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
             parts.append(f"{total_normals} normals fixed")
         if total_hull:
             parts.append(f"{total_hull} hull-rebuilt")
+        if total_split:
+            parts.append(f"{total_split} lopsided split into {total_pieces} pieces")
 
         if parts:
             msg = f"{', '.join(parts)} on {touched_objects} object(s)"
@@ -473,6 +606,8 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
                 issues.append(f"{total_remaining.boundary} boundary")
             if total_remaining.nonmanifold:
                 issues.append(f"{total_remaining.nonmanifold} non-manifold")
+            if total_remaining.centroid:
+                issues.append(f"{total_remaining.centroid} centroid-off")
             msg += (
                 f" — {' + '.join(issues)} remain on "
                 f"{len(dirty_objects)} object(s): "
@@ -480,10 +615,16 @@ class CursorBBox_OT_fix_convexity(bpy.types.Operator):
             )
             if len(dirty_objects) > 5:
                 msg += ", …"
-            if not self.rebuild_hull:
-                msg += "; enable Rebuild Hull to fix"
-            else:
-                msg += "; geometry may be too flat to form a solid hull"
+            if total_remaining.structural:
+                if not self.rebuild_hull:
+                    msg += "; enable Rebuild Hull to fix"
+                else:
+                    msg += "; geometry may be too flat to form a solid hull"
+            if unsplittable:
+                msg += ("; too lopsided to split (sharp tip?), truncate the tip by hand: "
+                        f"{', '.join(unsplittable[:5])}")
+            elif total_remaining.centroid and not self.split_lopsided:
+                msg += "; enable Split Lopsided to fix the centroid check"
             self.report({'WARNING'}, msg)
         else:
             self.report({'INFO'}, msg)
@@ -496,7 +637,8 @@ class CursorBBox_OT_check_convexity(bpy.types.Operator):
     bl_idname = "cursor_bbox.check_convexity"
     bl_label = "Check Convexity"
     bl_description = (
-        "Verify that selected mesh objects are convex. "
+        "Verify that selected mesh objects pass the engine's collision checks "
+        "(convex, closed, manifold, centroid sanity). "
         "Non-convex shapes will enter edit mode with invalid faces selected"
     )
     bl_options = {'REGISTER', 'UNDO'}
@@ -544,7 +686,7 @@ class CursorBBox_OT_check_convexity(bpy.types.Operator):
                 detail = f"{len(result.invalid_faces)} non-convex"
                 if result.worst_face >= 0:
                     detail += (
-                        f" (worst {result.worst_outside:.4f}m"
+                        f" (worst {result.worst_outside:.4f} engine m"
                         f" @ face {result.worst_face})"
                     )
                 parts.append(detail)
@@ -554,6 +696,11 @@ class CursorBBox_OT_check_convexity(bpy.types.Operator):
                 parts.append(f"{result.boundary_count} boundary")
             if result.nonmanifold_count:
                 parts.append(f"{result.nonmanifold_count} non-manifold")
+            if result.centroid_percent > validate_obj.MAX_CENTROID_MISMATCH_PERCENT:
+                parts.append(
+                    f"centroid off {result.centroid_percent:.1f}% "
+                    f"(max {validate_obj.MAX_CENTROID_MISMATCH_PERCENT:g}%, use Fix)"
+                )
             self.report(
                 {'WARNING'},
                 f"\"{obj.name}\": {' + '.join(parts)} / {result.total_faces} faces",

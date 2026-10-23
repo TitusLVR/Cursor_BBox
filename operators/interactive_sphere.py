@@ -60,7 +60,7 @@ from ..functions.core import (
     disable_limitation_plane_wrapper as disable_limitation_plane
 )
 from ..settings.preferences import get_preferences
-from .brush_mixin import BrushMarkingMixin
+from .brush_mixin import BrushMarkingMixin, BRUSH_HELP_ITEMS
 from ..ui.hud.controller import HUDController
 from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
 from ..functions.undo_stack import OperatorUndoStack
@@ -318,8 +318,7 @@ class CursorBBox_OT_interactive_sphere(BrushMarkingMixin, bpy.types.Operator):
         self.hud_ctl = HUDController("interactive_sphere", "Interactive Sphere")
         self.hud_ctl.help.add_section(HUDSection("Object Mode", [
             HUDItem("Mark / unmark face", "LMB"),
-            HUDItem("Brush mark / unmark", "LMB drag / Ctrl+LMB drag"),
-            HUDItem("Brush radius", "[ / ]"),
+            *BRUSH_HELP_ITEMS,
             HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create sphere", "SPACE"),
             HUDItem("Enter point mode", "A"),
@@ -346,7 +345,7 @@ class CursorBBox_OT_interactive_sphere(BrushMarkingMixin, bpy.types.Operator):
         from ..functions.utils import CURSOR_PLANE_ALIGNMENTS as _PLANES
         _mode_names = ("All", "Vert", "Edge", "Face")
         self.hud_ctl.hud.add_param(HUDParam(
-            "Mode", lambda: "POINT" if self.point_mode else "MARK"))
+            "Mode", lambda: self._brush_mode_label() or ("POINT" if self.point_mode else "MARK")))
         self.hud_ctl.hud.add_param(HUDParam(
             "Marked faces",
             lambda: sum(len(v) for v in self.marked_faces.values()),
@@ -359,6 +358,7 @@ class CursorBBox_OT_interactive_sphere(BrushMarkingMixin, bpy.types.Operator):
             "Coplanar angle°",
             lambda: int(round(degrees(context.scene.cursor_bbox_coplanar_angle))),
             kind="int"))
+        self._brush_add_hud_params(self.hud_ctl.hud)
         self.hud_ctl.hud.add_param(HUDParam(
             "Depsgraph", lambda: self.use_depsgraph, kind="bool"))
         self.hud_ctl.hud.add_param(HUDParam(

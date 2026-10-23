@@ -63,7 +63,7 @@ from ..functions.core import (
     enable_limitation_plane_wrapper as enable_limitation_plane,
     disable_limitation_plane_wrapper as disable_limitation_plane,
 )
-from .brush_mixin import BrushMarkingMixin
+from .brush_mixin import BrushMarkingMixin, BRUSH_HELP_ITEMS
 from ..settings.preferences import get_preferences
 from ..ui.hud.controller import HUDController
 from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
@@ -593,8 +593,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
         self.hud_ctl = HUDController("interactive_hull", "Interactive Hull")
         self.hud_ctl.help.add_section(HUDSection("Object Mode", [
             HUDItem("Mark / unmark face", "LMB"),
-            HUDItem("Brush mark / unmark", "LMB drag / Ctrl+LMB drag"),
-            HUDItem("Brush radius", "[ / ]"),
+            *BRUSH_HELP_ITEMS,
             HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create hull", "SPACE"),
             HUDItem("Hull per object", "G"),
@@ -632,6 +631,9 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
         _mode_names = ("All", "Vert", "Edge", "Face")
 
         def _mode_str():
+            label = self._brush_mode_label()
+            if label:
+                return label
             if self.point_mode:
                 return "POINT"
             if self.thickness_mode:
@@ -657,8 +659,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             "Coplanar angle°",
             lambda: int(round(degrees(context.scene.cursor_bbox_coplanar_angle))),
             kind="int"))
-        self.hud_ctl.hud.add_param(HUDParam(
-            "Brush px", lambda: self.brush_radius, kind="int"))
+        self._brush_add_hud_params(self.hud_ctl.hud)
         self.hud_ctl.hud.add_param(HUDParam(
             "Depsgraph", lambda: self.use_depsgraph, kind="bool"))
         self.hud_ctl.hud.add_param(HUDParam(
