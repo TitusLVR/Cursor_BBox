@@ -8,8 +8,11 @@ Space to create one hull object per piece); ``split_kind`` selects the tools.
   (or of the marked faces). It has two states (``split_state``):
   CUT: hovering a face puts the 3D cursor on it and previews the two hulls a
   cut of the ACTIVE piece by the plane through the cursor (cursor Z, or X / Y
-  with ``R``) would produce; LMB makes that cut. Each side's hull is rebuilt
-  from the source polygons on that side.
+  with ``R``) would produce; LMB makes that cut. A clean cut (default)
+  splits the piece's hull itself in two (each piece keeps a "shell": the
+  points whose hull it is, and carries the source polygons inside it);
+  with tight cuts (``T``) each side's hull is rebuilt from the source
+  polygons on that side. ``G`` fits a piece to its geometry.
   PICK: entered after a keep-both cut or slabs; no plane, no preview, every
   piece filled evenly, the new pieces outlined; LMB on a piece makes it
   active and goes back to CUT. ``TAB`` toggles the two by hand.
@@ -83,6 +86,8 @@ from ..functions.utils import (
 from ..functions import hull_split as hs
 from ..functions.split import (
     make_piece,
+    merge_pieces,
+    fit_piece,
     hull_planes,
     hull_volume,
     collect_source_polys,
@@ -93,6 +98,7 @@ from ..functions.split import (
     MAX_AUTO_MERGE_ISLANDS,
 )
 from ..functions.undo_stack import OperatorUndoStack
+from ..settings.properties import SPLIT_PARAM_DEFAULTS, split_default
 from ..ui.hud.items import HUDItem, HUDParam
 
 
@@ -104,8 +110,11 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Toggle cut / pick piece", "TAB"),
     HUDItem("Make piece under mouse active", "RMB"),
     HUDItem("Quick merge into active, stay picking (TAB to cut)", "Shift+LMB / Shift+RMB"),
-    HUDItem("Hover a face / edge / vertex: cut by its plane / along the edge / "
-            "through the vertex", "Mouse"),
+    HUDItem("Hover a face: cut by its plane (edge / vertex: with S on, along the "
+            "edge / through the vertex)", "Mouse"),
+    HUDItem("Snap to edges / vertices", "S"),
+    HUDItem("Cut fit: auto / tight (hug geometry) / clean (just divide)", "T"),
+    HUDItem("Fit active piece to geometry", "G"),
     HUDItem("Plane: face / across X / across Y", "R"),
     HUDItem("Freeze plane", "F"),
     HUDItem("Plane offset 2% / 0.2%", "Alt+Wheel / Alt+Shift+Wheel"),
@@ -116,6 +125,7 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Edit existing collision under cursor", "Q"),
     HUDItem("Load existing collisions", "Shift+Q"),
     HUDItem("Add hull of whole selection", "W"),
+    HUDItem("Reset parameters to defaults", "Backspace"),
     HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
     HUDItem("Create hulls", "SPACE"),
 ]
@@ -128,11 +138,13 @@ ISLANDS_HELP_ITEMS = [
     HUDItem("Merge void %", "Shift+Wheel"),
     HUDItem("Ignore thinner", "Ctrl+Shift+Wheel"),
     HUDItem("Flat merge (coplanar parts ignore void %)", "F"),
+    HUDItem("Fit active piece to geometry", "G"),
     HUDItem("Merge mode: click a base, then click pieces to merge into it", "M"),
     HUDItem("Delete active piece", "X"),
     HUDItem("Edit existing collision under cursor", "Q"),
     HUDItem("Load existing collisions", "Shift+Q"),
     HUDItem("Add hull of whole selection", "W"),
+    HUDItem("Reset parameters to defaults", "Backspace"),
     HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
     HUDItem("Split mode (keep pieces)", "K"),
     HUDItem("Create hulls", "SPACE"),
@@ -147,7 +159,10 @@ _SLAB_KEYS = {
     'NUMPAD_2': 2, 'NUMPAD_3': 3, 'NUMPAD_4': 4, 'NUMPAD_5': 5,
     'NUMPAD_6': 6, 'NUMPAD_7': 7, 'NUMPAD_8': 8, 'NUMPAD_9': 9,
 }
-_BLOCKED_KEYS = {'A', 'T', 'D', 'G', 'C', 'S'}
+# 'S' (edge / vertex snap) and 'T' (tight cuts) are toggles in Split kind,
+# handled before the blocked keys, so they stay blocked in Islands kind.
+# 'G' (fit) is an owned key in both kinds.
+_BLOCKED_KEYS = {'A', 'T', 'D', 'C', 'S'}
 # Ray-cast steps past skipped objects when picking a collision object (Q).
 _PICK_MAX_STEPS = 16
 _CONFIRM_KEYS = {'SPACE', 'RET', 'NUMPAD_ENTER'}
@@ -237,6 +252,13 @@ def _world_bbox(obj):
         return None
 
 
+_CUT_FIT_LABELS = {
+    'AUTO': "Auto (existing: clean, new: tight)",
+    'TIGHT': "Tight (hug geometry)",
+    'CLEAN': "Clean (just divide)",
+}
+
+
 class SplitMixin:
 
     # ----- lifecycle -----
@@ -252,7 +274,7 @@ class SplitMixin:
         self._split_fresh = set()
         self.split_pieces = []
         self.split_active = 0
-        self.split_axis = 0
+        self.split_axis = split_default('split_axis')
         self.split_offset = 0.0
         self.split_frozen = False
         self._split_hover = None
@@ -265,12 +287,31 @@ class SplitMixin:
         self._split_timer = None
         self._split_preview_cost = 0.0
         # Auto-merge parameters (kept across explodes and split sessions).
-        self.split_merge_gap = 0.01
-        self.split_merge_cost = 0.25
-        self.split_ignore_thin = 0.0
+        self.split_merge_gap = split_default('split_merge_gap')
+        self.split_merge_cost = split_default('split_merge_cost')
+        self.split_ignore_thin = split_default('split_ignore_thin')
         # Flat-merge rule: coplanar parts merge within the gap whatever the
         # void (F in Islands).
-        self.split_merge_flat = True
+        self.split_merge_flat = split_default('split_merge_flat')
+        # Split CUT: snap the cutting plane to hovered edges / vertices (S);
+        # off: always the hovered face's plane.
+        self.split_snap_on = split_default('split_snap_on')
+        # How a cut rebuilds the two sides (T cycles):
+        #   'TIGHT' - each side's hull is rebuilt from the geometry on that
+        #             side, so empty volume is cut away;
+        #   'CLEAN' - the piece's hull is just divided in two;
+        #   'AUTO'  - tight for pieces built from geometry (shell None),
+        #             clean for pieces that came from an existing collision
+        #             object (they carry a shell).
+        # AUTO is the default because both fixed defaults were rejected in
+        # use: clean everywhere "no longer cuts the empty parts away", and
+        # tight on an existing hull re-derives it from the raw mesh, which
+        # brings back every vertex the hull's own clean-up had removed
+        # ("it cuts with garbage, vertices get added").
+        self.split_tight = split_default('split_tight')
+        # The values above are the defaults; the scene's remembered ones (from
+        # the previous run) replace them.
+        self._split_load_params(context)
         self._split_auto = None
         self._split_param_streak = False
         # Existing collision objects turned into pieces (Q, Shift+Q, autoload),
@@ -313,6 +354,60 @@ class SplitMixin:
         # Sources hidden for MERGE: {'names', 'selected', 'active'} or None.
         self._split_hidden_sources = None
         self._split_preview_reset()
+
+    # ----- remembered parameters (scene properties) -----
+
+    def _split_load_params(self, context):
+        """Take the Split / Islands parameters remembered in the scene
+        (``SPLIT_PARAM_DEFAULTS``); a missing or bad value keeps the
+        current one."""
+        scene = getattr(context, 'scene', None) if context is not None else None
+        if scene is None:
+            return
+        for attr, (prop, default) in SPLIT_PARAM_DEFAULTS.items():
+            try:
+                value = getattr(scene, prop, default)
+                if isinstance(default, bool):
+                    value = bool(value)
+                elif isinstance(default, int):
+                    value = min(2, max(0, int(value))) if attr == 'split_axis' else int(value)
+                elif isinstance(default, float):
+                    value = float(value)
+                    if not math.isfinite(value):
+                        continue
+                elif attr == 'split_tight' and value not in _CUT_FIT_LABELS:
+                    continue
+                setattr(self, attr, value)
+            except Exception as e:
+                print(f"Split: could not load {prop}: {e}")
+
+    def _split_store_params(self, context=None):
+        """Write the Split / Islands parameters back to the scene, so the
+        next run starts from them. Never raises."""
+        try:
+            scene = context.scene if context is not None else bpy.context.scene
+        except Exception:
+            scene = None
+        if scene is None:
+            return
+        for attr, (prop, _default) in SPLIT_PARAM_DEFAULTS.items():
+            if not hasattr(scene, prop):
+                continue
+            try:
+                value = getattr(self, attr)
+                if getattr(scene, prop) != value:
+                    setattr(scene, prop, value)
+            except Exception as e:
+                print(f"Split: could not store {prop}: {e}")
+
+    def _split_reset_params(self, context):
+        """Backspace: every remembered parameter back to its default (stored;
+        the live islands link re-groups like a wheel change)."""
+        for attr, (_prop, default) in SPLIT_PARAM_DEFAULTS.items():
+            setattr(self, attr, default)
+        self._split_store_params(context)
+        self._split_preview_reset()
+        self._split_param_changed(context, "Split / Islands parameters reset to defaults")
 
     def _split_preview_reset(self):
         """Forget the cached cut preview (pieces or the active index changed)."""
@@ -532,8 +627,9 @@ class SplitMixin:
             visible_getter=visible_split))
         hud.add_param(HUDParam(
             "Snap",
-            lambda: (_SNAP_NAMES.get(self._split_snap['kind'], "-")
-                     if getattr(self, '_split_snap', None) else "-"),
+            lambda: ((_SNAP_NAMES.get(self._split_snap['kind'], "-")
+                      if getattr(self, '_split_snap', None) else "-")
+                     + ("" if getattr(self, 'split_snap_on', False) else " (snap off)")),
             visible_getter=lambda: (visible_split() and not self._split_picking()
                                     and not self._split_merging())))
         hud.add_param(HUDParam(
@@ -541,6 +637,9 @@ class SplitMixin:
             visible_getter=lambda: visible() and self._split_merging()))
         hud.add_param(HUDParam(
             "Offset", lambda: self.split_offset, kind="float", fmt="{:.4f}",
+            visible_getter=visible_split))
+        hud.add_param(HUDParam(
+            "Cut fit", lambda: _CUT_FIT_LABELS.get(self.split_tight, "?"),
             visible_getter=visible_split))
         hud.add_param(HUDParam(
             "Merge gap", lambda: _gap_label(self.split_merge_gap),
@@ -668,7 +767,21 @@ class SplitMixin:
             p = view3d_utils.location_3d_to_region_2d(region, rv3d, v)
             verts_2d.append(None if p is None else (p.x, p.y))
         edges_2d = [(verts_2d[i], verts_2d[(i + 1) % n]) for i in range(n)]
-        choice = hs.pick_snap(mouse, verts_2d, edges_2d, _SNAP_VERT_PX, _SNAP_EDGE_PX)
+        if getattr(self, 'split_snap_on', False):
+            # Small faces: the reach shrinks with the face, so its middle
+            # always means "this face".
+            projected = [p for p in verts_2d if p is not None]
+            if len(projected) >= 2:
+                face_px = min(max(p[0] for p in projected) - min(p[0] for p in projected),
+                              max(p[1] for p in projected) - min(p[1] for p in projected))
+            else:
+                face_px = 0.0
+            choice = hs.pick_snap(mouse, verts_2d, edges_2d,
+                                  min(_SNAP_VERT_PX, 0.25 * face_px),
+                                  min(_SNAP_EDGE_PX, 0.20 * face_px))
+        else:
+            # Edge / vertex snapping is opt-in (S): the face plane.
+            choice = ('FACE',)
         face_pts = [tuple(v) for v in verts]
         snap = {'kind': 'FACE', 'face': face_pts, 'edge': None, 'vertex': None,
                 'origin': hit, 'normal': None}
@@ -767,7 +880,8 @@ class SplitMixin:
         active = self.split_pieces[self.split_active]
         t0 = time.perf_counter()
         try:
-            front, back = cut_piece(active, plane[0], plane[1], self._split_color_counter)
+            front, back = cut_piece(active, plane[0], plane[1], self._split_color_counter,
+                                    tight=self._split_use_tight(active))
         except Exception as e:
             print(f"Split: cut preview failed: {e}")
             front, back = None, None
@@ -851,8 +965,9 @@ class SplitMixin:
 
     def _split_snapshot(self):
         # The uid rides along so an unchanged piece keeps it through undo /
-        # redo (Space keeps a picked original whose piece uid survives).
-        return (tuple((p.polys, p.color_index, p.uid) for p in self.split_pieces),
+        # redo (Space keeps a picked original whose piece uid survives); the
+        # shell rebuilds the identical hull.
+        return (tuple((p.polys, p.color_index, p.uid, p.shell) for p in self.split_pieces),
                 self.split_active, self.split_kind, self.split_state, self._split_pristine)
 
     def _split_restore(self, context, snap):
@@ -864,8 +979,8 @@ class SplitMixin:
         self._split_fresh = set()
         self._split_preview_reset()
         pieces = []
-        for polys, color, uid in pieces_data:
-            piece = make_piece(polys, color, uid=uid)
+        for polys, color, uid, shell in pieces_data:
+            piece = make_piece(polys, color, uid=uid, shell=shell)
             if piece is not None:
                 pieces.append(piece)
         self.split_pieces = pieces
@@ -1016,17 +1131,26 @@ class SplitMixin:
         self._split_after_change(context)
         return True
 
+    def _split_use_tight(self, piece):
+        """Whether a cut of *piece* rebuilds the sides from geometry."""
+        mode = self.split_tight
+        if mode == 'TIGHT':
+            return True
+        if mode == 'CLEAN':
+            return False
+        return getattr(piece, 'shell', None) is None
+
     def _split_cut_or_pick(self, context):
-        """Plain LMB: cut the active piece, or, when the plane does not split
-        it, make the piece under the mouse active."""
-        if self._split_cut(context, 'BOTH'):
-            return
-        idx = self._split_pick(context)
-        if idx is not None and idx != self.split_active:
-            self._split_set_active(idx)
-            self._split_hover = idx
-        else:
-            self.report({'WARNING'}, "Plane does not split the active piece")
+        """Plain LMB in CUT: cut the ACTIVE piece, and only that one.
+
+        A click whose plane misses the active piece does nothing but warn. It
+        used to make the piece under the mouse active instead, which read as
+        "the tool cuts pieces I did not select": the next click then cut that
+        other piece. Changing the piece is explicit: RMB, TAB or the PICK state.
+        """
+        if not self._split_cut(context, 'BOTH'):
+            self.report({'WARNING'}, "Plane does not split the active piece "
+                                     "(RMB / TAB to choose another piece)")
 
     def _split_pick_or_merge(self, context, merge):
         """Make the piece under the mouse active, or (*merge*) merge it into
@@ -1117,25 +1241,52 @@ class SplitMixin:
             return
         normal = tuple(plane[1])
         active = self.split_pieces[self.split_active]
-        origins = hs.equal_planes(active.polys, normal, n)
-        if not origins:
-            self.report({'WARNING'}, "Active piece has no extent along the plane normal")
-            return
-        eps = hs.plane_eps(active.polys)
-        slabs = []
-        remaining = active.polys
-        for co in origins:
-            front, back = hs.split_polygons(remaining, co, normal, eps)
-            slabs.append(back)
-            remaining = front
-        slabs.append(remaining)
-        new_pieces = []
-        for k, polys in enumerate(slabs):
-            color = active.color_index if k == 0 else self._split_color_counter
-            piece = make_piece(polys, color) if polys else None
-            if piece is not None:
-                if k != 0:
-                    self._split_next_color()
+        if self._split_use_tight(active):
+            # Tight: slabs of the source polygons, each hull hugging them.
+            origins = hs.equal_planes(active.polys, normal, n)
+            if not origins:
+                self.report({'WARNING'}, "Active piece has no extent along the plane normal")
+                return
+            eps = hs.plane_eps(active.polys)
+            slabs = []
+            remaining = active.polys
+            for co in origins:
+                front, back = hs.split_polygons(remaining, co, normal, eps)
+                slabs.append(back)
+                remaining = front
+            slabs.append(remaining)
+            new_pieces = []
+            for k, polys in enumerate(slabs):
+                color = active.color_index if k == 0 else self._split_color_counter
+                piece = make_piece(polys, color) if polys else None
+                if piece is not None:
+                    if k != 0:
+                        self._split_next_color()
+                    new_pieces.append(piece)
+        else:
+            # Clean: equal slabs of the piece's hull itself (successive clean
+            # cuts; the source polygons travel with their slab).
+            origins = hs.equal_planes([tuple(tuple(v) for v in active.hull_verts)], normal, n)
+            if not origins:
+                self.report({'WARNING'}, "Active piece has no extent along the plane normal")
+                return
+            slabs = []
+            remaining = active
+            for co in origins:
+                front, back = cut_piece(remaining, co, normal, 0)
+                slabs.append(back)
+                remaining = front
+                if remaining is None:
+                    break
+            slabs.append(remaining)
+            new_pieces = []
+            for k, piece in enumerate(slabs):
+                if piece is None:
+                    continue
+                if new_pieces:
+                    piece.color_index = self._split_next_color()
+                else:
+                    piece.color_index = active.color_index
                 new_pieces.append(piece)
         if len(new_pieces) < 2:
             self.report({'WARNING'}, "Could not split the active piece into slabs")
@@ -1165,7 +1316,7 @@ class SplitMixin:
         active = self.split_pieces[self.split_active]
         other = self.split_pieces[index]
         if merged is None:
-            merged = make_piece(active.polys + other.polys, active.color_index)
+            merged = merge_pieces(active, other, active.color_index)
         if merged is None:
             self.report({'WARNING'}, "Merge failed")
             return False
@@ -1248,7 +1399,7 @@ class SplitMixin:
         other = self.split_pieces[self._split_hover]
         t0 = time.perf_counter()
         try:
-            piece = make_piece(base.polys + other.polys, base.color_index)
+            piece = merge_pieces(base, other, base.color_index)
         except Exception as e:
             print(f"Split: merge preview failed: {e}")
             piece = None
@@ -1264,6 +1415,40 @@ class SplitMixin:
         if key is None:
             return None
         return self._split_merge_cache.get(key)
+
+    def _split_fit(self, context):
+        """G: fit a piece to its geometry (shell None: the hull of its source
+        polygons; undoable). The active piece, or in PICK / MERGE the piece
+        under the mouse (none: no-op)."""
+        if not self.split_pieces:
+            return
+        if self._split_picking() or self._split_merging():
+            idx = self._split_pick(context)
+            if idx is None:
+                return
+        else:
+            idx = self.split_active
+        if not 0 <= idx < len(self.split_pieces):
+            return
+        piece = self.split_pieces[idx]
+        if piece.shell is None:
+            self.report({'INFO'}, "Already fitted")
+            return
+        fitted = fit_piece(piece)
+        if fitted is None:
+            self.report({'WARNING'}, "No geometry to fit to")
+            return
+        self._split_undo.push(self._split_snapshot())
+        self._split_end_auto()
+        self._split_pristine = False
+        self.split_pieces[idx] = fitted
+        if self._split_merging() and self._split_merge_base == piece.uid:
+            self._split_merge_base = fitted.uid
+        if getattr(self, '_split_quick_target', None) == piece.uid:
+            self._split_quick_target = fitted.uid
+        self._split_preview_reset()
+        self._split_hover = self._split_pick(context)
+        self.report({'INFO'}, "Fitted the piece to its geometry")
 
     def _split_delete(self, context):
         if len(self.split_pieces) <= 1:
@@ -1392,8 +1577,10 @@ class SplitMixin:
             context, "Flat merge: " + ("ON" if self.split_merge_flat else "OFF"))
 
     def _split_param_changed(self, context, label):
-        """Report a changed auto-merge parameter and, while the last explode
-        is live, re-group it (consecutive changes share one undo entry)."""
+        """Report a changed auto-merge parameter, remember it in the scene
+        and, while the last explode is live, re-group it (consecutive
+        changes share one undo entry)."""
+        self._split_store_params(context)
         record = self._split_auto
         if record is None:
             self.report({'INFO'}, label)
@@ -1550,18 +1737,13 @@ class SplitMixin:
         return hs.clip_to_convex(candidates, region['planes'], region['eps'])
 
     def _split_piece_from_object(self, context, obj):
-        """Q: ``(piece, region)``: a Piece of the source geometry inside
-        *obj*'s convex hull, else of *obj*'s own polygons; piece None when
-        neither encloses a volume."""
-        _points, own_polys, region = self._split_object_region(context, obj)
-        color = self._split_color_counter
-        piece = None
-        if region is not None:
-            clipped = self._split_inside_polys(context, region)
-            if clipped:
-                piece = make_piece(clipped, color)
-        if piece is None and own_polys:
-            piece = make_piece(own_polys, color)
+        """Q: ``(piece, region)``: a Piece shaped exactly like *obj* (its
+        shell is the object's own world-space vertices) carrying the source
+        geometry clipped inside it (possibly none: a hand-made box); piece
+        None when the object has no volume."""
+        points, _own_polys, region = self._split_object_region(context, obj)
+        clipped = self._split_inside_polys(context, region) if region is not None else ()
+        piece = make_piece(clipped, self._split_color_counter, shell=tuple(points))
         return piece, region
 
     def _split_owned_piece(self, context, obj):
@@ -1575,13 +1757,15 @@ class SplitMixin:
         clipped = self._split_inside_polys(context, region)
         if not clipped:
             return None, None
-        piece = make_piece(clipped, self._split_color_counter)
-        if piece is None:
+        fitted = make_piece(clipped, self._split_color_counter)
+        if fitted is None:
             return None, None
         own_volume = hull_volume(points)
-        if not own_volume > 0.0 or piece.volume < _OWNED_MIN_RATIO * own_volume:
+        if not own_volume > 0.0 or fitted.volume < _OWNED_MIN_RATIO * own_volume:
             return None, None
-        return piece, region
+        # Owned: shown exactly as the object is (its own hull as the shell).
+        piece = make_piece(clipped, self._split_color_counter, shell=tuple(points))
+        return (piece, region) if piece is not None else (None, None)
 
     def _split_remainder_piece(self, context):
         """The source geometry OUTSIDE every picked object's convex region,
@@ -1847,7 +2031,8 @@ class SplitMixin:
         base_name = context.scene.cursor_bbox_name_hull or "Convex"
         created, failed = 0, 0
         for piece in to_create:
-            verts = [Vector(p) for p in hs.unique_points(piece.polys)]
+            # The hull as shown (shelled pieces are not the hull of polys).
+            verts = [Vector(v) for v in piece.hull_verts]
             if _build_hull_object_from_vertices(context, verts, base_name):
                 created += 1
             else:
@@ -1978,8 +2163,14 @@ class SplitMixin:
         if not press:
             # Releases of keys we own are swallowed; others (HUD etc.) fall through.
             return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L', 'TAB', 'Q', 'W',
-                              'M'}
+                              'M', 'G', 'BACK_SPACE'}
                              | _CONFIRM_KEYS | _BLOCKED_KEYS | set(_SLAB_KEYS))
+
+        if etype == 'BACK_SPACE':
+            if not event.ctrl and not event.alt and not event.shift:
+                self._split_reset_params(context)
+                self._split_refresh(context)
+            return True
 
         if etype == 'M':
             if not event.ctrl and not event.alt and not event.shift:
@@ -1997,6 +2188,37 @@ class SplitMixin:
                     self._split_load_existing_key(context)
                 else:
                     self._split_edit_existing(context, event)
+                self._split_refresh(context)
+            return True
+
+        if etype == 'S' and not islands:
+            # Split kind: edge / vertex snapping on / off (Islands: blocked).
+            if not event.ctrl and not event.alt and not event.shift:
+                self.split_snap_on = not self.split_snap_on
+                self._split_store_params(context)
+                self.report({'INFO'}, "Snap to edges / vertices: "
+                                      + ("ON" if self.split_snap_on else "OFF"))
+                if not self._split_no_plane() and not self.split_frozen:
+                    self._split_track_mouse(context, event)
+                self._split_refresh(context)
+            return True
+
+        if etype == 'T' and not islands:
+            # Split kind: tight / clean cuts (Islands: blocked).
+            if not event.ctrl and not event.alt and not event.shift:
+                order = ('AUTO', 'TIGHT', 'CLEAN')
+                current = self.split_tight if self.split_tight in order else 'AUTO'
+                self.split_tight = order[(order.index(current) + 1) % len(order)]
+                self._split_store_params(context)
+                self._split_preview_reset()
+                self.report({'INFO'}, "Cut fit: " + _CUT_FIT_LABELS[self.split_tight])
+                self._split_refresh(context)
+            return True
+
+        if etype == 'G':
+            if not event.ctrl and not event.alt and not event.shift:
+                self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
+                self._split_fit(context)
                 self._split_refresh(context)
             return True
 
@@ -2106,6 +2328,7 @@ class SplitMixin:
 
         if etype == 'R':
             self.split_axis = (self.split_axis + 1) % 3
+            self._split_store_params(context)
             snap = self._split_snap
             if self.split_frozen and (snap is None or snap.get('normal') is None):
                 # The cursor has not moved since freezing: R still turns the

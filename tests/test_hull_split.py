@@ -666,5 +666,87 @@ class SectionTests(unittest.TestCase):
         self.assertEqual(hs.scale_polygon([], 2.0), [])
 
 
+def _cube_points():
+    return hs.unique_points(_cube_polys())
+
+
+class PlaneRectTests(unittest.TestCase):
+    def _sides(self, rect):
+        a, b, c, _d = rect
+        return (sum((b[k] - a[k]) ** 2 for k in range(3)) ** 0.5,
+                sum((c[k] - b[k]) ** 2 for k in range(3)) ** 0.5)
+
+    def test_horizontal_plane_through_the_cube(self):
+        rect = hs.plane_rect(_cube_points(), (0.3, 0.3, 0.5), (0, 0, 1.0), (1.0, 0, 0),
+                             1.12, 0.05)
+        self.assertEqual(len(rect), 4)
+        su, sv = self._sides(rect)
+        self.assertAlmostEqual(su, 1.12)
+        self.assertAlmostEqual(sv, 1.12)
+        for p in rect:
+            self.assertAlmostEqual(p[2], 0.5)
+        cx = sum(p[0] for p in rect) / 4
+        cy = sum(p[1] for p in rect) / 4
+        self.assertAlmostEqual(cx, 0.5)
+        self.assertAlmostEqual(cy, 0.5)
+        # Sides along X / Y.
+        self.assertAlmostEqual(rect[0][1], rect[1][1])
+
+    def test_plane_beside_the_cube(self):
+        rect = hs.plane_rect(_cube_points(), (3.0, 0.0, 0.0), (1.0, 0, 0), (0, 1.0, 0),
+                             1.12, 0.05)
+        su, sv = self._sides(rect)
+        self.assertAlmostEqual(su, 1.12)
+        self.assertAlmostEqual(sv, 1.12)
+        for p in rect:
+            self.assertAlmostEqual(p[0], 3.0)
+        self.assertAlmostEqual(sum(p[1] for p in rect) / 4, 0.5)
+        self.assertAlmostEqual(sum(p[2] for p in rect) / 4, 0.5)
+
+    def test_u_is_projected_onto_the_plane(self):
+        # u tilted out of the z = 0.5 plane: same result as pure +X.
+        a = hs.plane_rect(_cube_points(), (0, 0, 0.5), (0, 0, 1.0), (1.0, 0, 0.7), 1.0, 0.0)
+        b = hs.plane_rect(_cube_points(), (0, 0, 0.5), (0, 0, 1.0), (1.0, 0, 0), 1.0, 0.0)
+        for p, q in zip(a, b):
+            for k in range(3):
+                self.assertAlmostEqual(p[k], q[k])
+
+    def test_degenerate_u_falls_back(self):
+        for u in ((0, 0, 1.0), (0, 0, 0), None):
+            rect = hs.plane_rect(_cube_points(), (0, 0, 0.5), (0, 0, 1.0), u, 1.0, 0.0)
+            self.assertEqual(len(rect), 4)
+            su, sv = self._sides(rect)
+            self.assertAlmostEqual(su, 1.0)
+            self.assertAlmostEqual(sv, 1.0)
+
+    def test_flat_points_get_the_minimum_side(self):
+        # A segment along X seen along +Z: no extent along Y.
+        pts = [(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)]
+        rect = hs.plane_rect(pts, (0, 0, 0), (0, 0, 1.0), (1.0, 0, 0), 1.12, 0.05)
+        su, sv = self._sides(rect)
+        self.assertAlmostEqual(su, 2.24)
+        self.assertAlmostEqual(sv, 0.05)
+
+    def test_plane_square(self):
+        sq = hs.plane_square((0.5, 0.5, 0.5), (0.0, 0.0, 2.0), (0, 0, 1.0), (1.0, 1.0, 0.0), 1.0)
+        self.assertEqual(len(sq), 4)
+        for p in sq:
+            self.assertAlmostEqual(p[2], 2.0)
+        self.assertAlmostEqual(sum(p[0] for p in sq) / 4, 0.5)
+        self.assertAlmostEqual(sum(p[1] for p in sq) / 4, 0.5)
+        su, sv = self._sides(sq)
+        self.assertAlmostEqual(su, 2.0)
+        self.assertAlmostEqual(sv, 2.0)
+        # First side along the (diagonal) hint.
+        d = tuple(sq[1][k] - sq[0][k] for k in range(3))
+        self.assertAlmostEqual(d[0], d[1])
+        self.assertAlmostEqual(d[2], 0.0)
+        self.assertEqual(hs.plane_square((0, 0, 0), (0, 0, 0), (0, 0, 0), None, 1.0), [])
+
+    def test_zero_normal_or_no_points(self):
+        self.assertEqual(hs.plane_rect(_cube_points(), (0, 0, 0), (0, 0, 0), None, 1.0, 0.0), [])
+        self.assertEqual(hs.plane_rect([], (0, 0, 0), (0, 0, 1.0), None, 1.0, 0.0), [])
+
+
 if __name__ == "__main__":
     unittest.main()

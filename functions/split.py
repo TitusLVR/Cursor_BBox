@@ -43,11 +43,16 @@ class Piece:
 
     __slots__ = ('polys', 'hull_verts', 'hull_tris', 'hull_edges', 'bvh',
                  'tri_normals', 'tri_centers', 'edge_normals',
-                 'color_index', 'center', 'radius', 'extent', 'uid', 'volume')
+                 'color_index', 'center', 'radius', 'extent', 'uid', 'volume', 'shell')
 
     def __init__(self, polys, hull_verts, hull_tris, hull_edges, bvh, color_index,
-                 tri_normals=(), tri_centers=(), volume=0.0, edge_normals=(), uid=None):
+                 tri_normals=(), tri_centers=(), volume=0.0, edge_normals=(), uid=None,
+                 shell=None):
+        # Source polygons inside the piece (carried along for a later fit).
         self.polys = polys
+        # The points whose convex hull IS the piece (tuple of xyz tuples), or
+        # None: the hull of the polygons (a "fitted" piece).
+        self.shell = shell
         self.hull_verts = hull_verts      # list of world-space Vectors
         self.hull_tris = hull_tris        # flat vertex list for 'TRIS', outward winding
         self.hull_edges = hull_edges      # flat vertex list for 'LINES'
@@ -67,7 +72,7 @@ class Piece:
         center /= max(1, len(hull_verts))
         self.center = center
         self.radius = max(((v - center).length for v in hull_verts), default=0.0)
-        self.extent = hs.extent(polys)
+        self.extent = hs.extent(polys) if shell is None else hs.extent((shell,))
         self.volume = volume              # volume of the hull
         # A given uid means "the same piece rebuilt" (undo / redo): identical
         # geometry, so caches keyed by uid stay valid.
@@ -242,16 +247,25 @@ def _clean_hull_edges(bm, hull_center):
             tmp.free()
 
 
-def make_piece(polys, color_index, uid=None):
-    """Build a Piece from *polys*, or None when they do not enclose a volume.
+def make_piece(polys, color_index, uid=None, shell=None):
+    """Build a Piece, or None when its hull does not enclose a volume.
 
-    *uid* (optional) reuses the uid of the piece these polygons came from
-    unchanged (undo / redo); otherwise the piece gets a new one."""
+    Without *shell* the hull is that of *polys* (a fitted piece). With
+    *shell* (points) the hull is that of the shell points and *polys* (the
+    source polygons inside, possibly none) are only carried along.
+    *uid* (optional) reuses the uid of the piece rebuilt unchanged (undo /
+    redo); otherwise the piece gets a new one."""
     polys = tuple(polys)
-    if not polys:
-        return None
-    points = hs.unique_points(polys)
-    if not hs.is_solid(points, hs.plane_eps(polys)):
+    if shell is None:
+        if not polys:
+            return None
+        points = hs.unique_points(polys)
+        eps = hs.plane_eps(polys)
+    else:
+        shell = tuple(tuple(float(c) for c in p) for p in hs.unique_points((tuple(shell),)))
+        points = list(shell)
+        eps = max(1e-6 * hs.extent((shell,)), 1e-9)
+    if not hs.is_solid(points, eps):
         return None
     try:
         data = _hull_data(points)
@@ -263,7 +277,28 @@ def make_piece(polys, color_index, uid=None):
         print(f"Split: failed to build piece hull: {e}")
         return None
     return Piece(polys, hull_verts, tris, edges, bvh, color_index, tri_normals, tri_centers,
-                 hs.tris_volume(tris), edge_normals, uid)
+                 hs.tris_volume(tris), edge_normals, uid, shell)
+
+
+def hull_points(piece):
+    """The piece's hull vertices as xyz tuples."""
+    return [tuple(v) for v in piece.hull_verts]
+
+
+def merge_pieces(a, b, color_index):
+    """The piece that merges *a* and *b*: polygons concatenated; the hull of
+    both hulls when either has a shell, else (both fitted) the hull of the
+    polygons as before. None when not solid."""
+    if a.shell is None and b.shell is None:
+        return make_piece(a.polys + b.polys, color_index)
+    return make_piece(a.polys + b.polys, color_index,
+                      shell=tuple(hull_points(a) + hull_points(b)))
+
+
+def fit_piece(piece, color_index=None):
+    """The piece fitted to its geometry (shell None: the hull of its
+    polygons), or None when the polygons do not enclose a volume."""
+    return make_piece(piece.polys, piece.color_index if color_index is None else color_index)
 
 
 def hull_volume(points):
@@ -345,7 +380,7 @@ def clone_piece(piece, color_index):
     """A new Piece (new uid) sharing *piece*'s geometry, with another colour."""
     return Piece(piece.polys, piece.hull_verts, piece.hull_tris, piece.hull_edges, piece.bvh,
                  color_index, piece.tri_normals, piece.tri_centers, piece.volume,
-                 piece.edge_normals)
+                 piece.edge_normals, shell=piece.shell)
 
 
 # More islands than this are not auto-merged: every island becomes a piece.
@@ -482,8 +517,17 @@ def collect_source_polys(context, faces_dict, use_depsgraph):
     return tuple(polys)
 
 
-def cut_piece(piece, plane_co, plane_no, next_color):
+def cut_piece(piece, plane_co, plane_no, next_color, tight=False):
     """Cut *piece* by a plane. Returns ``(front, back)`` Pieces (or None each).
+
+    Clean cut (default): the piece's HULL is split; each side's shell is the
+    unique points of its part of the hull triangles (the section points are
+    in both), so the two pieces together are exactly the original one. The
+    source polygons are split too and travel with their side. A side is
+    valid when its shell is solid.
+
+    *tight*: each side's hull is rebuilt from its own polygons (shell None),
+    hugging the geometry (the original behaviour).
 
     The front piece keeps the piece's colour; the back piece gets *next_color*.
     """
@@ -491,10 +535,27 @@ def cut_piece(piece, plane_co, plane_no, next_color):
     if no.length_squared < 1e-20:
         return None, None
     no.normalize()
-    eps = hs.plane_eps(piece.polys)
-    front_polys, back_polys = hs.split_polygons(piece.polys, tuple(plane_co), tuple(no), eps)
-    front = make_piece(front_polys, piece.color_index) if front_polys else None
-    back = make_piece(back_polys, next_color) if back_polys else None
+    co = tuple(plane_co)
+    no = tuple(no)
+    if tight:
+        eps = hs.plane_eps(piece.polys) if piece.polys else max(1e-6 * piece.extent, 1e-9)
+        front_polys, back_polys = (hs.split_polygons(piece.polys, co, no, eps)
+                                   if piece.polys else ((), ()))
+        front = make_piece(front_polys, piece.color_index) if front_polys else None
+        back = make_piece(back_polys, next_color) if back_polys else None
+        return front, back
+    eps = max(1e-6 * piece.extent, 1e-9)
+    tris = piece.hull_tris
+    hull_polys = tuple((tuple(tris[i]), tuple(tris[i + 1]), tuple(tris[i + 2]))
+                       for i in range(0, len(tris) - 2, 3))
+    hull_front, hull_back = hs.split_polygons(hull_polys, co, no, eps)
+    front_polys, back_polys = (hs.split_polygons(piece.polys, co, no, eps)
+                               if piece.polys else ((), ()))
+    front = (make_piece(front_polys, piece.color_index,
+                        shell=tuple(hs.unique_points(hull_front)))
+             if hull_front else None)
+    back = (make_piece(back_polys, next_color, shell=tuple(hs.unique_points(hull_back)))
+            if hull_back else None)
     return front, back
 
 
@@ -625,48 +686,30 @@ def _solid_item(piece, role):
     return item
 
 
-# The cutting-plane preview is the active piece's section grown by this.
-_PLANE_SECTION_SCALE = 1.12
-# Fallback square (plane misses the active piece): half-size / piece radius.
-_PLANE_FALLBACK_HALF = 0.25
+# The cutting-plane preview: a square on the projection of the active
+# piece's centre, half-size this many times the piece radius.
+_PLANE_HALF_FACTOR = 1.2
 
 
 def plane_polygon(piece, plane_co, plane_no, plane_axis=None):
-    """World-space polygon (list of Vectors) showing the cutting plane: the
-    section of *piece*'s hull scaled by ``_PLANE_SECTION_SCALE``, or, when
-    the plane misses the hull or only grazes it (section area below 1e-6 x
-    extent squared), a small square on the plane origin. The square's first
-    side runs along *plane_axis* (a world vector, e.g. the hovered edge)
-    projected onto the plane; without a usable hint along the world axis
-    least parallel to the normal. [] for a zero normal."""
-    co = Vector(plane_co)
+    """World-space square (4 Vectors) showing the cutting plane: centred on
+    the projection of *piece*'s centre onto the plane, half-size
+    ``_PLANE_HALF_FACTOR`` x its radius, sides along *plane_axis* (a world
+    vector, e.g. the hovered face edge) projected onto the plane (world axis
+    least parallel to the normal without a usable hint). Drawn whether or
+    not the plane cuts the piece. [] for a zero normal."""
     no = Vector(plane_no)
     if no.length_squared < 1e-20:
         return []
-    no.normalize()
-    eps = max(1e-6 * piece.extent, 1e-9)
-    section = hs.section_polygon(piece.hull_tris, tuple(co), tuple(no), eps)
-    if section and hs.polygon_area(section) >= 1e-6 * piece.extent * piece.extent:
-        return [Vector(p) for p in hs.scale_polygon(section, _PLANE_SECTION_SCALE)]
-    u = None
+    axis = None
     if plane_axis is not None:
         try:
-            hint = Vector(plane_axis)
-            hint = hint - no * hint.dot(no)
-            if hint.length_squared > 1e-12 * max(1.0, Vector(plane_axis).length_squared):
-                u = hint
+            axis = tuple(Vector(plane_axis))
         except Exception:
-            u = None
-    if u is None:
-        axes = (Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), Vector((0.0, 0.0, 1.0)))
-        axis = min(axes, key=lambda a: abs(a.dot(no)))
-        u = axis - no * axis.dot(no)
-    if u.length_squared < 1e-20:
-        return []
-    half = max(piece.radius, 1e-4) * _PLANE_FALLBACK_HALF
-    u = u.normalized() * half
-    v = no.cross(u).normalized() * half
-    return [co - u - v, co + u - v, co + u + v, co - u + v]
+            axis = None
+    square = hs.plane_square(tuple(piece.center), tuple(Vector(plane_co)), tuple(no), axis,
+                             max(piece.radius, 1e-4) * _PLANE_HALF_FACTOR)
+    return [Vector(p) for p in square]
 
 
 def overlay_geometry(pieces, active, hover, plane, preview=None, pick=False, fresh=(),
@@ -677,8 +720,8 @@ def overlay_geometry(pieces, active, hover, plane, preview=None, pick=False, fre
     the pieces a cut of the active piece would produce, or None; when given
     they are drawn instead of the active piece. The hovered piece (when not
     the active one) is highlighted. The plane is drawn as ``plane_polygon``
-    of the ACTIVE piece (the section is the same during a cut preview):
-    ``{'polygon': [points]}``; *plane_axis* orients its fallback square.
+    of the ACTIVE piece (also during a cut preview): ``{'polygon':
+    [points]}``, a rectangle oriented by *plane_axis*.
 
     *pick* (Split mode's piece-selection state) draws every piece evenly,
     the hovered one strongest, the pieces whose uid is in *fresh* outlined,

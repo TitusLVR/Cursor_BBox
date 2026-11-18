@@ -5,6 +5,34 @@ from bpy.props import (
     EnumProperty, PointerProperty,
 )
 
+# Split / Islands tunable parameters remembered per scene: mixin attribute ->
+# (scene property, default). The one table of defaults, used by the property
+# definitions, the modal (operators/split_mixin.py) and the reset operator.
+SPLIT_PARAM_DEFAULTS = {
+    'split_tight': ('cursor_bbox_split_fit', 'AUTO'),
+    'split_snap_on': ('cursor_bbox_split_snap', False),
+    'split_axis': ('cursor_bbox_split_axis', 0),
+    'split_merge_gap': ('cursor_bbox_split_merge_gap', 0.01),
+    'split_merge_cost': ('cursor_bbox_split_merge_cost', 0.25),
+    'split_ignore_thin': ('cursor_bbox_split_ignore_thin', 0.0),
+    'split_merge_flat': ('cursor_bbox_split_merge_flat', True),
+}
+
+
+def split_default(attr):
+    """Default value of the Split / Islands parameter *attr*."""
+    return SPLIT_PARAM_DEFAULTS[attr][1]
+
+
+def reset_split_params(scene):
+    """Set the Split / Islands scene properties back to their defaults."""
+    for prop, default in SPLIT_PARAM_DEFAULTS.values():
+        try:
+            setattr(scene, prop, default)
+        except Exception as e:
+            print(f"CursorBBox: could not reset {prop}: {e}")
+
+
 # HUD / Help overlay state remembered per scene (saved with the .blend).
 # *_pos_set stays False until the user drags that overlay in this scene.
 _HUD_SCENE_PROPS = {
@@ -429,6 +457,65 @@ def register():
         default=False,
     )
 
+    # Split / Islands parameters (Interactive Hull, K / L): the modal loads
+    # them on start and writes every change back (defaults: the table above).
+    bpy.types.Scene.cursor_bbox_split_fit = bpy.props.EnumProperty(
+        name="Cut Fit",
+        description="How the two sides of a Split cut get their hulls",
+        items=[
+            ('AUTO', "Auto", "Tight on pieces built from geometry, clean on pieces "
+                             "from existing collision objects"),
+            ('TIGHT', "Tight", "Each side's hull hugs the source geometry on that side"),
+            ('CLEAN', "Clean", "The piece's hull is split in two as it is"),
+        ],
+        default=split_default('split_tight'),
+    )
+
+    bpy.types.Scene.cursor_bbox_split_snap = bpy.props.BoolProperty(
+        name="Snap to Edges / Vertices",
+        description="Split mode: the cutting plane snaps to hovered edges and vertices",
+        default=split_default('split_snap_on'),
+    )
+
+    bpy.types.Scene.cursor_bbox_split_axis = bpy.props.IntProperty(
+        name="Plane Axis",
+        description="Split mode cutting plane: 0 = face, 1 = across X, 2 = across Y",
+        default=split_default('split_axis'),
+        min=0,
+        max=2,
+    )
+
+    bpy.types.Scene.cursor_bbox_split_merge_gap = bpy.props.FloatProperty(
+        name="Merge Gap",
+        description="Islands mode: parts closer than this may merge",
+        default=split_default('split_merge_gap'),
+        min=0.001,
+        unit='LENGTH',
+    )
+
+    bpy.types.Scene.cursor_bbox_split_merge_cost = bpy.props.FloatProperty(
+        name="Merge Void",
+        description="Islands mode: largest share of empty space a merged hull may add",
+        default=split_default('split_merge_cost'),
+        min=0.0,
+        max=0.95,
+        subtype='FACTOR',
+    )
+
+    bpy.types.Scene.cursor_bbox_split_ignore_thin = bpy.props.FloatProperty(
+        name="Ignore Thinner",
+        description="Islands mode: islands thinner than this are ignored (0 = off)",
+        default=split_default('split_ignore_thin'),
+        min=0.0,
+        unit='LENGTH',
+    )
+
+    bpy.types.Scene.cursor_bbox_split_merge_flat = bpy.props.BoolProperty(
+        name="Flat Merge",
+        description="Islands mode: coplanar parts merge within the gap whatever the void",
+        default=split_default('split_merge_flat'),
+    )
+
     bpy.types.Scene.cursor_bbox_name_box = bpy.props.StringProperty(
         name="Box Name",
         description="Name pattern for Box objects",
@@ -595,6 +682,8 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_coplanar_angle
     del bpy.types.Scene.cursor_bbox_brush_radius
     del bpy.types.Scene.cursor_bbox_brush_through
+    for _prop, _default in SPLIT_PARAM_DEFAULTS.values():
+        delattr(bpy.types.Scene, _prop)
     del bpy.types.Scene.cursor_bbox_name_box
     del bpy.types.Scene.cursor_bbox_name_hull
     del bpy.types.Scene.cursor_bbox_name_sphere

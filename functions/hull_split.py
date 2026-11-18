@@ -264,6 +264,86 @@ def section_polygon(flat_tris: Sequence[Sequence[float]], plane_co: Sequence[flo
     return pts
 
 
+def _plane_basis(plane_no, axis_u):
+    """``(u, v)`` unit in-plane basis: *axis_u* projected onto the plane when
+    usable, else the world axis least parallel to the normal, projected;
+    ``v = normal x u``. None for a zero normal."""
+    no = _normalized(plane_no)
+    if no is None:
+        return None
+    u = None
+    if axis_u is not None:
+        a = tuple(float(c) for c in axis_u)
+        a_len = _length(a)
+        if a_len > 1e-12:
+            pa = _sub(a, tuple(c * _dot(a, no) for c in no))
+            if _length(pa) > 1e-6 * a_len:
+                u = _normalized(pa)
+    if u is None:
+        axis = min(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+                   key=lambda w: abs(_dot(w, no)))
+        u = _normalized(_sub(axis, tuple(c * _dot(axis, no) for c in no)))
+        if u is None:
+            return None
+    return u, _cross(no, u)
+
+
+def plane_square(center: Sequence[float], plane_co: Sequence[float],
+                 plane_no: Sequence[float], axis_u, half: float) -> list[Vec3]:
+    """Square in a plane, centred on the projection of *center* onto it,
+    half-size *half*, sides along the basis of ``_plane_basis`` (the hint
+    *axis_u* projected, or a world axis). Returns the 4 corners in order, or
+    [] for a zero normal."""
+    no = _normalized(plane_no)
+    basis = _plane_basis(plane_no, axis_u)
+    if no is None or basis is None:
+        return []
+    u, v = basis
+    d = _dot(_sub(center, plane_co), no)
+    c = (center[0] - no[0] * d, center[1] - no[1] * d, center[2] - no[2] * d)
+    out = []
+    for su, sv in ((-half, -half), (half, -half), (half, half), (-half, half)):
+        out.append((c[0] + u[0] * su + v[0] * sv,
+                    c[1] + u[1] * su + v[1] * sv,
+                    c[2] + u[2] * su + v[2] * sv))
+    return out
+
+
+def plane_rect(points: Sequence[Sequence[float]], plane_co: Sequence[float],
+               plane_no: Sequence[float], axis_u, scale: float,
+               min_side: float) -> list[Vec3]:
+    """Rectangle in a plane covering the projections of *points* onto it.
+
+    The in-plane basis is *axis_u* projected onto the plane (when it is
+    usable), else the world axis least parallel to the normal, projected;
+    ``v = normal x u``. The bounding rectangle of the projected points in
+    (u, v) is scaled about its centre by *scale*, each side at least
+    *min_side*. Returns the 4 corners in order (on the plane), or [] for a
+    zero normal or no points.
+    """
+    basis = _plane_basis(plane_no, axis_u)
+    if basis is None or not points:
+        return []
+    u, v = basis
+    lo_u = lo_v = math.inf
+    hi_u = hi_v = -math.inf
+    for p in points:
+        d = _sub(p, plane_co)
+        su, sv = _dot(d, u), _dot(d, v)
+        lo_u, hi_u = min(lo_u, su), max(hi_u, su)
+        lo_v, hi_v = min(lo_v, sv), max(hi_v, sv)
+    cu, cv = (lo_u + hi_u) * 0.5, (lo_v + hi_v) * 0.5
+    half_u = max((hi_u - lo_u) * scale, min_side) * 0.5
+    half_v = max((hi_v - lo_v) * scale, min_side) * 0.5
+    out = []
+    for su, sv in ((-half_u, -half_v), (half_u, -half_v), (half_u, half_v), (-half_u, half_v)):
+        a, b = cu + su, cv + sv
+        out.append((plane_co[0] + u[0] * a + v[0] * b,
+                    plane_co[1] + u[1] * a + v[1] * b,
+                    plane_co[2] + u[2] * a + v[2] * b))
+    return out
+
+
 def polygon_area(points: Sequence[Sequence[float]]) -> float:
     """Area of a planar 3D polygon (half the Newell normal's length); 0 for
     fewer than 3 points."""

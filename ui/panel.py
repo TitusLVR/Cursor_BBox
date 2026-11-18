@@ -296,6 +296,27 @@ class CursorBBox_PT_main(bpy.types.Panel):
             sub.prop(scene, 'cursor_bbox_hull_triangulate_quads', text="Quad Method")
             sub.prop(scene, 'cursor_bbox_hull_triangulate_ngons', text="N-gon Method")
 
+        # Split / Islands parameters (Interactive Hull K / L): remembered
+        # between runs; editable here, reset with the button (or Backspace in
+        # the mode).
+        if hasattr(scene, 'cursor_bbox_split_fit'):
+            col.separator()
+            split_box = col.box()
+            row = split_box.row()
+            row.alignment = 'LEFT'
+            row.label(text="Split / Islands", icon='MOD_EXPLODE')
+            sub = split_box.column(align=True)
+            sub.prop(scene, 'cursor_bbox_split_fit', text="Cut Fit")
+            sub.prop(scene, 'cursor_bbox_split_axis', text="Plane Axis")
+            sub.prop(scene, 'cursor_bbox_split_snap', text="Snap to Edges / Vertices", toggle=True)
+            sub.separator()
+            sub.prop(scene, 'cursor_bbox_split_merge_gap', text="Merge Gap")
+            sub.prop(scene, 'cursor_bbox_split_merge_cost', text="Merge Void", slider=True)
+            sub.prop(scene, 'cursor_bbox_split_ignore_thin', text="Ignore Thinner")
+            sub.prop(scene, 'cursor_bbox_split_merge_flat', text="Flat Merge", toggle=True)
+            split_box.operator("cursor_bbox.split_reset_params", text="Reset to Defaults",
+                               icon='LOOP_BACK')
+
         # Subtle preferences button
         row = box.row()
         row.alignment = 'RIGHT'
