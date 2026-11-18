@@ -481,6 +481,186 @@ def disable_brush_circle(state):
     state.brush_circle = None
 
 
+def _split_batch(gpu_manager, shader, key, kind, verts):
+    """Batch cached under *key* without per-draw hashing (piece geometry is
+    immutable; a changed piece gets a new key)."""
+    batch = gpu_manager.batch_cache.get(key)
+    if batch is None and verts:
+        batch = batch_for_shader(shader, kind, {"pos": verts})
+        gpu_manager.batch_cache[key] = batch
+    return batch
+
+
+def _split_view():
+    """``(signature, is_perspective, vector)`` of the region being drawn, or None.
+
+    *vector* is the eye position (perspective) or the unit direction towards
+    the viewer (orthographic). The signature changes whenever the view does.
+    """
+    rv3d = getattr(bpy.context, 'region_data', None)
+    if rv3d is None:
+        return None
+    try:
+        vm = rv3d.view_matrix
+        persp = bool(rv3d.is_perspective)
+        sig = (persp, tuple(tuple(row) for row in vm))
+        if persp:
+            vec = vm.inverted().translation.copy()
+        else:
+            vec = rv3d.view_rotation @ Vector((0.0, 0.0, 1.0))
+            vec.normalize()
+        return sig, persp, vec
+    except Exception:
+        return None
+
+
+def _split_fill_colors(item, view):
+    """Per-vertex RGBA for a piece's flat tri list: one colour per triangle,
+    alpha faded by how the triangle faces the viewer."""
+    from ..functions.hull_split import facing_alpha
+    r, g, b = item['rgb']
+    base = item['fill_alpha']
+    normals = item['normals']
+    centers = item['centers']
+    count = len(item['tris']) // 3
+    colors = []
+    if view is None or len(normals) != count or len(centers) != count:
+        col = (r, g, b, base * 0.6)
+        return [col] * (count * 3)
+    _sig, persp, vec = view
+    for k in range(count):
+        n = normals[k]
+        if persp:
+            d = vec - centers[k]
+            length = d.length
+            facing = n.dot(d) / length if length > 1e-12 else 0.0
+        else:
+            facing = n.dot(vec)
+        col = (r, g, b, facing_alpha(facing, base))
+        colors.extend((col, col, col))
+    return colors
+
+
+def _split_fill_batch(gpu_manager, shader, item, view, view_id):
+    """Colour batch of one piece, rebuilt only when the view or its look changed."""
+    tris = item['tris']
+    if not tris:
+        return None
+    key = f"split_fill_{item['key']}_{view_id}"
+    sig = (view[0] if view else None, item['role'], item['rgb'], item['fill_alpha'])
+    batch = gpu_manager.batch_cache.get(key)
+    if batch is not None and gpu_manager.last_data_hashes.get(key) == sig:
+        return batch
+    batch = batch_for_shader(shader, 'TRIS',
+                             {"pos": tris, "color": _split_fill_colors(item, view)})
+    gpu_manager.batch_cache[key] = batch
+    gpu_manager.last_data_hashes[key] = sig
+    return batch
+
+
+def draw_split_overlay(gpu_manager, split_overlay):
+    """Draw split-mode pieces and the cutting plane (POST_VIEW).
+
+    ``split_overlay`` is ``{'pieces': [item], 'plane': {'tris', 'border'} or
+    None}`` or None, items from ``functions.split.overlay_geometry``. Fills
+    are drawn without depth test so pieces stay visible through the source
+    mesh; their alpha fades with how each triangle faces the viewer.
+    """
+    if not split_overlay:
+        return
+    pieces = split_overlay.get('pieces') or []
+    plane = split_overlay.get('plane')
+
+    # Drop batches of pieces that no longer exist
+    # (keys: split_fill_<uid>_<view>, split_edges_<uid>).
+    live = {str(item['key']) for item in pieces}
+    stale = []
+    for k in gpu_manager.batch_cache:
+        if isinstance(k, str) and k.startswith('split_'):
+            parts = k.split('_')
+            if len(parts) < 3 or parts[2] not in live:
+                stale.append(k)
+    for key in stale:
+        gpu_manager.clear_cache_key(key)
+
+    view = _split_view()
+    rv3d = getattr(bpy.context, 'region_data', None)
+    try:
+        view_id = rv3d.as_pointer() if rv3d is not None else 0
+    except Exception:
+        view_id = 0
+
+    prev_blend = gpu.state.blend_get()
+    prev_depth = gpu.state.depth_test_get()
+    prev_mask = gpu.state.depth_mask_get()
+    prev_width = gpu.state.line_width_get()
+
+    smooth = gpu_manager.get_shader('SMOOTH_COLOR')
+    shader = gpu_manager.get_shader('UNIFORM_COLOR')
+    gpu.state.blend_set('ALPHA')
+    gpu.state.depth_mask_set(False)
+    gpu.state.face_culling_set('NONE')
+    try:
+        # Soft translucent fills, visible through the mesh.
+        gpu.state.depth_test_set('NONE')
+        smooth.bind()
+        for item in pieces:
+            batch = _split_fill_batch(gpu_manager, smooth, item, view, view_id)
+            if batch:
+                batch.draw(smooth)
+
+        shader.bind()
+        if plane:
+            shader.uniform_float("color", (0.55, 0.8, 1.0, 0.06))
+            batch_for_shader(shader, 'TRIS', {"pos": plane['tris']}).draw(shader)
+
+        # Edges: inactive pieces respect depth; hovered, active and preview
+        # outlines are always visible.
+        for on_top in (False, True):
+            gpu.state.depth_test_set('NONE' if on_top else 'LESS_EQUAL')
+            for item in pieces:
+                if bool(item['edge_on_top']) != on_top:
+                    continue
+                batch = _split_batch(gpu_manager, shader, f"split_edges_{item['key']}",
+                                     'LINES', item['edges'])
+                if batch:
+                    gpu.state.line_width_set(item['edge_width'])
+                    shader.uniform_float("color", item['edge'])
+                    batch.draw(shader)
+
+        if plane:
+            gpu.state.depth_test_set('NONE')
+            gpu.state.line_width_set(1.0)
+            shader.uniform_float("color", (0.55, 0.8, 1.0, 0.35))
+            batch_for_shader(shader, 'LINES', {"pos": plane['border']}).draw(shader)
+    finally:
+        gpu.state.line_width_set(prev_width)
+        gpu.state.depth_mask_set(prev_mask)
+        gpu.state.depth_test_set(prev_depth)
+        gpu.state.blend_set(prev_blend)
+
+
+def create_split_overlay_handler(state):
+    def draw_split_overlay_wrapper():
+        draw_split_overlay(state.gpu_manager, getattr(state, 'split_overlay', None))
+    return draw_split_overlay_wrapper
+
+
+def enable_split_overlay(state):
+    if 'split_overlay' not in state.handlers:
+        state.handlers['split_overlay'] = bpy.types.SpaceView3D.draw_handler_add(
+            create_split_overlay_handler(state), (), 'WINDOW', 'POST_VIEW'
+        )
+
+
+def disable_split_overlay(state):
+    if 'split_overlay' in state.handlers:
+        bpy.types.SpaceView3D.draw_handler_remove(state.handlers['split_overlay'], 'WINDOW')
+        del state.handlers['split_overlay']
+    state.split_overlay = None
+    state.gpu_manager.clear_cache_prefix('split_')
+
+
 def create_edge_highlight_handler(state):
     """Create edge highlight drawing handler"""
     def draw_edge_highlight_wrapper():

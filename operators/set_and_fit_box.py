@@ -7,7 +7,9 @@ from ..functions.utils import (
     snap_cursor_to_closest_element,
     is_collection_instance,
     make_collection_instance_real,
-    cleanup_collection_instance_temp
+    cleanup_collection_instance_temp,
+    suspend_triangulate,
+    restore_triangulate,
 )
 from ..functions.core import (
     cursor_aligned_bounding_box,
@@ -90,6 +92,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
     
     def cleanup_all_instances(self, context):
         """Clean up all temporary collection instances."""
+        restore_triangulate(context)
         for obj, instance_info in self.instance_data.items():
             cleanup_collection_instance_temp(context, instance_info)
         self.instance_data.clear()
@@ -586,7 +589,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             self.restore_selection(context)  # Restore original selection
             if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
                 self.hud_ctl.detach(context)
-            return {'CANCELLED'}
+            return {'FINISHED'}  # not CANCELLED: objects made in this modal need an undo step, or a later Ctrl+Z crashes Blender
 
         elif event.type == 'RIGHTMOUSE':
             self.bbox_mode = None
@@ -599,7 +602,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             self.restore_selection(context)  # Restore original selection
             if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
                 self.hud_ctl.detach(context)
-            return {'CANCELLED'}
+            return {'FINISHED'}  # not CANCELLED: objects made in this modal need an undo step, or a later Ctrl+Z crashes Blender
         
         return {'RUNNING_MODAL'}
     
@@ -636,6 +639,7 @@ class CursorBBox_OT_set_and_fit_box(bpy.types.Operator):
             enable_edge_highlight()
             enable_bbox_preview()
             self._setup_hud(context)
+            suspend_triangulate(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:

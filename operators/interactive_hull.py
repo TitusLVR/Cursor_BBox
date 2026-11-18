@@ -5,6 +5,8 @@ from mathutils import Vector
 from math import radians, degrees
 from ..functions.utils import (
     restore_selection_state,
+    suspend_triangulate,
+    restore_triangulate,
     set_cursor_rotation_to_principal_plane,
     CURSOR_PLANE_ALIGNMENTS,
     get_face_edges_from_raycast,
@@ -64,6 +66,7 @@ from ..functions.core import (
     disable_limitation_plane_wrapper as disable_limitation_plane,
 )
 from .brush_mixin import BrushMarkingMixin, BRUSH_HELP_ITEMS
+from .split_mixin import SplitMixin, SPLIT_HELP_ITEMS, ISLANDS_HELP_ITEMS
 from ..settings.preferences import get_preferences
 from ..ui.hud.controller import HUDController
 from ..ui.hud.items import HUDItem, HUDSection, HUDParam, ItemState
@@ -95,6 +98,20 @@ def _reconvex_in_place(bm):
     bm.edges.ensure_lookup_table()
     bm.faces.ensure_lookup_table()
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+
+def _auto_fix(context, obj):
+    """Check / repair a just-created hull (scene toggle "Auto Check & Fix")."""
+    from .check_convexity import auto_fix_new_hull
+    auto_fix_new_hull(context, obj)
+
+
+def report_auto_fix(operator):
+    """Report what the auto check / fix did since the last call, if anything."""
+    from .check_convexity import pop_auto_fix_summary
+    summary = pop_auto_fix_summary()
+    if summary is not None:
+        operator.report({summary[0]}, summary[1])
 
 
 def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_value=0.0, select_new_object=True, use_depsgraph=False, face_thickness=0.0):
@@ -218,6 +235,7 @@ def create_convex_hull_from_marked(marked_faces_dict, marked_points=None, push_v
         # Set up object (collection, styles)
         from ..functions.utils import setup_new_object, restore_selection_state
         setup_new_object(context, obj, assign_styles=True, move_to_collection=True)
+        _auto_fix(context, obj)
         
         # Handle Selection
         for o in context.selected_objects:
@@ -301,6 +319,7 @@ def _build_hull_object_from_vertices(context, world_vertices, name):
         new_obj.location = center_of_geometry
         from ..functions.utils import setup_new_object
         setup_new_object(context, new_obj, assign_styles=True, move_to_collection=True)
+        _auto_fix(context, new_obj)
         return new_obj
     except Exception as e:
         print(f"Error building convex hull '{name}': {e}")
@@ -394,7 +413,7 @@ def create_convex_hulls_from_object_islands(obj, push_value=0.0, use_depsgraph=F
     return created
 
 
-class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
+class CursorBBox_OT_interactive_hull(SplitMixin, BrushMarkingMixin, bpy.types.Operator):
     """Create convex hull from marked faces"""
     bl_idname = "cursor_bbox.interactive_hull"
     bl_label = "Interactive Hull"
@@ -478,6 +497,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
     
     def cleanup_all_instances(self, context):
         """Clean up all temporary collection instances."""
+        restore_triangulate(context)
         for obj, instance_info in self.instance_data.items():
             cleanup_collection_instance_temp(context, instance_info)
         self.instance_data.clear()
@@ -597,7 +617,8 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             HUDItem("Mark all polygons", "Ctrl+A"),
             HUDItem("Create hull", "SPACE"),
             HUDItem("Hull per object", "G"),
-            HUDItem("Hull per island", "L"),
+            HUDItem("Split mode", "K"),
+            HUDItem("Islands mode", "L"),
             HUDItem("Enter point mode", "A"),
             HUDItem("Thickness mode", "T"),
             HUDItem("Toggle coplanar", "C"),
@@ -627,11 +648,13 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             HUDItem("Reset to 0", "R"),
             HUDItem("Exit thickness mode", "T"),
         ]))
+        self.hud_ctl.help.add_section(HUDSection("Split Mode", SPLIT_HELP_ITEMS))
+        self.hud_ctl.help.add_section(HUDSection("Islands Mode", ISLANDS_HELP_ITEMS))
         from ..functions.utils import CURSOR_PLANE_ALIGNMENTS as _PLANES
         _mode_names = ("All", "Vert", "Edge", "Face")
 
         def _mode_str():
-            label = self._brush_mode_label()
+            label = self._split_mode_label() or self._brush_mode_label()
             if label:
                 return label
             if self.point_mode:
@@ -660,6 +683,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             lambda: int(round(degrees(context.scene.cursor_bbox_coplanar_angle))),
             kind="int"))
         self._brush_add_hud_params(self.hud_ctl.hud)
+        self._split_add_hud_params(self.hud_ctl.hud)
         self.hud_ctl.hud.add_param(HUDParam(
             "Depsgraph", lambda: self.use_depsgraph, kind="bool"))
         self.hud_ctl.hud.add_param(HUDParam(
@@ -702,6 +726,10 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             self.hud_ctl.update_event(event, context)
             if self.hud_ctl.handle_events(context, event):
                 return {'RUNNING_MODAL'}
+
+        # Split mode (K): manual convex decomposition, owns most keys while on.
+        if self._split_handle_event(context, event):
+            return {'RUNNING_MODAL'}
 
         # Circle brush: LMB drag marks, Ctrl+LMB drag unmarks, [ / ] radius.
         if self._brush_handle_event(context, event):
@@ -1054,6 +1082,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
                     o.select_set(True)
                 context.view_layer.objects.active = created[-1]
                 self.report({'INFO'}, f"Created {len(created)} convex hull(s)")
+                report_auto_fix(self)
             else:
                 self.report({'WARNING'}, "Failed to create convex hulls")
             context.area.tag_redraw()
@@ -1077,6 +1106,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
                     o.select_set(True)
                 context.view_layer.objects.active = created[-1]
                 self.report({'INFO'}, f"Created {len(created)} island hull(s)")
+                report_auto_fix(self)
             else:
                 self.report({'WARNING'}, "Failed to create convex hulls")
             context.area.tag_redraw()
@@ -1092,6 +1122,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
                     select_new_object=False, use_depsgraph=self.use_depsgraph, face_thickness=self.face_thickness
                 ):
                     self.report({'INFO'}, "Created Convex Hull. Ready for new selection.")
+                    report_auto_fix(self)
                     # Clear markings after successful creation
                     clear_all_markings()
                     clear_preview_faces()
@@ -1303,6 +1334,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             disable_bbox_preview()
             disable_face_marking()
             self._brush_shutdown()
+            self._split_shutdown()
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
@@ -1313,7 +1345,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
                 self.hud_ctl.detach(context)
             context.area.tag_redraw()
-            return {'CANCELLED'}
+            return {'FINISHED'}  # not CANCELLED: objects made in this modal need an undo step, or a later Ctrl+Z crashes Blender
 
         # Finished
         elif event.type == 'RIGHTMOUSE':
@@ -1321,6 +1353,7 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             disable_bbox_preview()
             disable_face_marking()
             self._brush_shutdown()
+            self._split_shutdown()
             clear_all_markings()
             clear_preview_faces()
             clear_preview_point()
@@ -1419,7 +1452,9 @@ class CursorBBox_OT_interactive_hull(BrushMarkingMixin, bpy.types.Operator):
             enable_edge_highlight()
             enable_bbox_preview()
             self._brush_init(context)
+            self._split_init(context)
             self._setup_hud(context)
+            suspend_triangulate(context, self.original_selected_objects)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:

@@ -20,6 +20,8 @@ from ..ui.draw import (
     disable_limitation_plane,
     enable_brush_circle,
     disable_brush_circle,
+    enable_split_overlay,
+    disable_split_overlay,
 )
 
 # ===== STATE MANAGEMENT =====
@@ -50,6 +52,8 @@ class CursorBBoxState:
         self.snap_targets_preview = None
         # 2D brush circle while LMB-drag marking: {'center', 'radius', 'remove'}
         self.brush_circle = None
+        # Hull split mode: pieces + cutting plane (see ui.draw.draw_split_overlay)
+        self.split_overlay = None
 
     def cleanup(self):
         """Clean up all state and handlers"""
@@ -63,6 +67,7 @@ class CursorBBoxState:
         self.coordinate_transform_cache.clear()
         self.current_edge_data = None
         self.current_bbox_data = None
+        self.split_overlay = None
     
     def disable_all_handlers(self):
         """Disable all GPU handlers"""
@@ -1327,3 +1332,36 @@ def clear_brush_circle():
     """Hide the brush circle without removing its handler."""
     global _state
     _state.brush_circle = None
+
+
+def enable_split_overlay_wrapper():
+    """Register the POST_VIEW split-mode overlay handler (idempotent)."""
+    global _state
+    enable_split_overlay(_state)
+
+
+def disable_split_overlay_wrapper():
+    """Remove the split-mode overlay handler and drop its data."""
+    global _state
+    disable_split_overlay(_state)
+
+
+def update_split_overlay(data):
+    """Show split-mode pieces / plane (dict from functions.split.overlay_geometry)."""
+    global _state
+    _state.split_overlay = data
+
+
+def clear_split_overlay():
+    """Hide the split-mode overlay without removing its handler."""
+    global _state
+    _state.split_overlay = None
+    _state.gpu_manager.clear_cache_prefix('split_')
+
+
+def hide_hull_preview():
+    """Hide the live hull preview (redrawn by update_marked_faces_convex_hull)."""
+    global _state
+    _state.current_bbox_data = None
+    _state.gpu_manager.clear_cache_key('bbox_faces')
+    _state.gpu_manager.clear_cache_key('bbox_edges')

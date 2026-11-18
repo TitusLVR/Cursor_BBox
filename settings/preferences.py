@@ -249,7 +249,18 @@ class CursorBBoxPreferences(AddonPreferences):
         description="Use evaluated dependency graph for raycasting and operations (slower but supports modifiers)",
         default=True
     )
-    
+
+    use_active_collection: BoolProperty(
+        name="Create in Active Collection",
+        description=(
+            "Put new collision objects into the active collection (Outliner) "
+            "instead of the named collision collection"
+        ),
+        default=True,
+        # Toggled from the N-panel too: flag prefs as changed so auto-save keeps it.
+        update=lambda self, context: setattr(context.preferences, "is_dirty", True),
+    )
+
     def draw(self, context):
         layout = self.layout
         
@@ -265,6 +276,8 @@ class CursorBBoxPreferences(AddonPreferences):
             
             row = box.row()
             row.prop(self, "use_depsgraph")
+            row = box.row()
+            row.prop(self, "use_active_collection")
         
         elif self.active_tab == 'TOOLS':
             # V-HACD

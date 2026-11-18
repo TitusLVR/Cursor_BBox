@@ -57,6 +57,7 @@ class HUDController:
         if title:
             self.hud.title = title
         self.help = HelpOverlay(operator_name)
+        self._restore_scene_state(bpy.context)
         self._handle = None
         self._event_snap = None
         self._context = None
@@ -91,18 +92,62 @@ class HUDController:
         """Forward param-toggle / help-toggle / drag events to the
         overlays. Returns True if the event was consumed and the modal
         operator should `return {'RUNNING_MODAL'}` immediately."""
-        try:
-            prefs = context.preferences.addons["Cursor_BBox"].preferences
-            theme_prefs = prefs.hud_theme
-        except (KeyError, AttributeError):
+        theme_prefs = self._theme_prefs(context)
+        if theme_prefs is None:
             return False
+        scene = getattr(context, "scene", None)
         if self.hud.handle_param_toggle_event(event, theme_prefs):
+            if scene is not None:
+                scene.cursor_bbox_hud_params_visible = self.hud.params_visible
             if context.area is not None:
                 context.area.tag_redraw()
             return True
+        hud_dragging = self.hud._drag.active
+        help_dragging = self.help._drag.active
         if handle_help_toggle(self.help, context, event, hud=self.hud):
+            if scene is not None:
+                scene.cursor_bbox_help_expanded = self.help.expanded
+                # A drag just ended: remember where it was dropped.
+                if hud_dragging and not self.hud._drag.active:
+                    scene.cursor_bbox_hud_pos_set = True
+                    scene.cursor_bbox_hud_pos_x = theme_prefs.hud_free_x
+                    scene.cursor_bbox_hud_pos_y = theme_prefs.hud_free_y
+                if help_dragging and not self.help._drag.active:
+                    scene.cursor_bbox_help_pos_set = True
+                    scene.cursor_bbox_help_pos_x = theme_prefs.help_free_x
+                    scene.cursor_bbox_help_pos_y = theme_prefs.help_free_y
             return True
         return False
+
+    @staticmethod
+    def _theme_prefs(context):
+        try:
+            return context.preferences.addons["Cursor_BBox"].preferences.hud_theme
+        except (KeyError, AttributeError):
+            return None
+
+    def _restore_scene_state(self, context) -> None:
+        """Apply the HUD/Help state saved in the scene (.blend): param rows
+        and Help toggles, plus any position the user dragged an overlay to."""
+        scene = getattr(context, "scene", None)
+        if scene is None or not hasattr(scene, "cursor_bbox_help_expanded"):
+            return
+        self.hud.params_visible = bool(scene.cursor_bbox_hud_params_visible)
+        expanded = bool(scene.cursor_bbox_help_expanded)
+        self.help.expanded = expanded
+        self.help._anim_from_expanded = expanded
+        self.help._anim_to_expanded = expanded
+        theme_prefs = self._theme_prefs(context)
+        if theme_prefs is None:
+            return
+        if scene.cursor_bbox_hud_pos_set:
+            theme_prefs.hud_mode = "free"
+            theme_prefs.hud_free_x = max(0, scene.cursor_bbox_hud_pos_x)
+            theme_prefs.hud_free_y = max(0, scene.cursor_bbox_hud_pos_y)
+        if scene.cursor_bbox_help_pos_set:
+            theme_prefs.help_corner = "free"
+            theme_prefs.help_free_x = max(0, scene.cursor_bbox_help_pos_x)
+            theme_prefs.help_free_y = max(0, scene.cursor_bbox_help_pos_y)
 
     def detach(self, context) -> None:
         """Remove the draw handler. Safe to call multiple times."""

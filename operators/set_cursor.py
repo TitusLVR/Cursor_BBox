@@ -1,5 +1,5 @@
 import bpy
-from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element
+from ..functions.utils import get_face_edges_from_raycast, select_edge_by_scroll, place_cursor_with_raycast_and_edge, snap_cursor_to_closest_element, suspend_triangulate, restore_triangulate
 from ..functions.core import (
     enable_edge_highlight_wrapper as enable_edge_highlight,
     disable_edge_highlight_wrapper as disable_edge_highlight,
@@ -42,6 +42,7 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
             
             disable_edge_highlight()
             disable_bbox_preview()
+            restore_triangulate(context)
             return {'FINISHED'}
 
         elif event.type == 'WHEELUPMOUSE' and not event.shift and not event.ctrl:
@@ -97,11 +98,13 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
         elif event.type == 'ESC':
             disable_edge_highlight()
             disable_bbox_preview()
+            restore_triangulate(context)
             return {'CANCELLED'}
 
         elif event.type == 'RIGHTMOUSE':
             disable_edge_highlight()
             disable_bbox_preview()
+            restore_triangulate(context)
             return {'FINISHED'}
         
         return {'RUNNING_MODAL'}
@@ -112,6 +115,7 @@ class CursorBBox_OT_set_cursor(bpy.types.Operator):
             self.current_face_data = None
             enable_edge_highlight()
             enable_bbox_preview()
+            suspend_triangulate(context)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:

@@ -32,7 +32,7 @@ from ..functions.core import (
     clear_preview_faces,
     rebuild_marked_faces_visual_data,
 )
-from ..functions.utils import get_faces_to_process
+from ..functions.utils import get_faces_to_process, suspend_triangulate
 from ..functions.brush_select import apply_stroke
 from ..functions.brush import (
     BrushFaceCache,
@@ -203,6 +203,7 @@ class BrushMarkingMixin:
             self.report({'INFO'}, f"{obj.name} is already a target")
             return
         self.original_selected_objects.add(obj)
+        suspend_triangulate(context, [obj])
         try:
             obj.select_set(True)
         except RuntimeError:

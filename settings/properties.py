@@ -5,6 +5,27 @@ from bpy.props import (
     EnumProperty, PointerProperty,
 )
 
+# HUD / Help overlay state remembered per scene (saved with the .blend).
+# *_pos_set stays False until the user drags that overlay in this scene.
+_HUD_SCENE_PROPS = {
+    "cursor_bbox_hud_params_visible": BoolProperty(
+        name="HUD Params Visible", default=True, options={'HIDDEN'}),
+    "cursor_bbox_help_expanded": BoolProperty(
+        name="Help Expanded", default=True, options={'HIDDEN'}),
+    "cursor_bbox_hud_pos_set": BoolProperty(
+        name="HUD Position Saved", default=False, options={'HIDDEN'}),
+    "cursor_bbox_hud_pos_x": IntProperty(
+        name="HUD Position X", default=40, options={'HIDDEN'}),
+    "cursor_bbox_hud_pos_y": IntProperty(
+        name="HUD Position Y", default=40, options={'HIDDEN'}),
+    "cursor_bbox_help_pos_set": BoolProperty(
+        name="Help Position Saved", default=False, options={'HIDDEN'}),
+    "cursor_bbox_help_pos_x": IntProperty(
+        name="Help Position X", default=40, options={'HIDDEN'}),
+    "cursor_bbox_help_pos_y": IntProperty(
+        name="Help Position Y", default=40, options={'HIDDEN'}),
+}
+
 # Shared preset items for both V-HACD and CoACD detail dropdowns
 _DETAIL_ITEMS = [
     ('D01', "1 - Minimal", "Barest outline"),
@@ -432,6 +453,10 @@ def register():
         default="CursorBBox"
     )
 
+    # HUD / Help overlay state, saved with the .blend (see ui/hud/controller.py)
+    for _name, _prop in _HUD_SCENE_PROPS.items():
+        setattr(bpy.types.Scene, _name, _prop)
+
     # Convexity fix settings
     bpy.types.Scene.cursor_bbox_fix_area_threshold = bpy.props.FloatProperty(
         name="Area Threshold",
@@ -473,6 +498,16 @@ def register():
         default=True
     )
 
+    bpy.types.Scene.cursor_bbox_hull_auto_fix = bpy.props.BoolProperty(
+        name="Auto Check & Fix Convexity",
+        description=(
+            "Run Check Convexity on every hull as it is created and, when it "
+            "fails, Fix Convexity (degenerate faces, weld, normals, hull "
+            "rebuild, lopsided split), so neither has to be run by hand"
+        ),
+        default=True
+    )
+
     bpy.types.Scene.cursor_bbox_hull_use_triangulate = bpy.props.BoolProperty(
         name="Triangulate Hull",
         description="Triangulate the final convex hull mesh",
@@ -504,15 +539,12 @@ def register():
 
     def update_material_color(self, context):
         """Update material color when property changes"""
-        rgba = list(self.cursor_bbox_material_color) + [1.0]
+        from ..functions.utils import collision_rgba, apply_collision_material_color
+        rgba = collision_rgba(self)
 
         mat = bpy.data.materials.get("Cursor BBox Material")
         if mat:
-            mat.diffuse_color = rgba
-            if mat.use_nodes:
-                bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                if bsdf:
-                    bsdf.inputs['Base Color'].default_value = rgba
+            apply_collision_material_color(mat, rgba)
 
         coll_name = context.scene.cursor_bbox_collection_name
         if coll_name in bpy.data.collections:
@@ -529,6 +561,19 @@ def register():
         update=update_material_color
     )
 
+    bpy.types.Scene.cursor_bbox_material_alpha = bpy.props.FloatProperty(
+        name="Opacity",
+        description=(
+            "Opacity of collision objects (object colour and material), so the "
+            "geometry under them stays visible"
+        ),
+        subtype='FACTOR',
+        default=0.7,
+        min=0.0,
+        max=1.0,
+        update=update_material_color
+    )
+
     def update_use_material(self, context):
         """Update material usage"""
         if self.cursor_bbox_use_material:
@@ -537,7 +582,7 @@ def register():
     bpy.types.Scene.cursor_bbox_use_material = bpy.props.BoolProperty(
         name="Use Material",
         description="Apply material and color to created objects",
-        default=False,
+        default=True,
         update=update_use_material
     )
 
@@ -555,14 +600,19 @@ def unregister():
     del bpy.types.Scene.cursor_bbox_name_sphere
     del bpy.types.Scene.cursor_bbox_collection_name
     del bpy.types.Scene.cursor_bbox_material_color
+    del bpy.types.Scene.cursor_bbox_material_alpha
     del bpy.types.Scene.cursor_bbox_use_material
     del bpy.types.Scene.cursor_bbox_fix_area_threshold
     del bpy.types.Scene.cursor_bbox_fix_weld_distance
     del bpy.types.Scene.cursor_bbox_hull_dissolve_angle
     del bpy.types.Scene.cursor_bbox_hull_reconvex
+    del bpy.types.Scene.cursor_bbox_hull_auto_fix
     del bpy.types.Scene.cursor_bbox_hull_use_triangulate
     del bpy.types.Scene.cursor_bbox_hull_triangulate_quads
     del bpy.types.Scene.cursor_bbox_hull_triangulate_ngons
+
+    for _name in _HUD_SCENE_PROPS:
+        delattr(bpy.types.Scene, _name)
 
     del bpy.types.Scene.cursor_bbox_vhacd
     del bpy.types.Scene.cursor_bbox_coacd

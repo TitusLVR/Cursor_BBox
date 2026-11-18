@@ -2,6 +2,7 @@ import bpy
 import bmesh
 from mathutils import Vector, Matrix
 from bpy_extras import view3d_utils
+from mathutils.bvhtree import BVHTree
 import time
 from functools import lru_cache
 
@@ -85,6 +86,31 @@ def get_context_hash():
     view_layer_name = context.view_layer.name
     return hash((selected_names, view_layer_name))
 
+# ===== RAW MESH BVH (Depsgraph off) =====
+
+# obj pointer -> (key, BVHTree in object space) built from obj.data, i.e. the
+# mesh without modifiers. Cleared at the start and end of every modal session.
+_raw_bvh_cache = {}
+
+
+def _get_raw_bvh(obj):
+    """Object-space BVH of the unevaluated mesh of *obj*.
+
+    With Depsgraph off every face index refers to ``obj.data``. Casting at
+    the evaluated object instead returns indices of the modifier output, so
+    Bevel / Mirror / Array would name the wrong polygon or fall out of range.
+    """
+    mesh = obj.data
+    key = (mesh.as_pointer(), len(mesh.vertices), len(mesh.polygons))
+    entry = _raw_bvh_cache.get(obj.as_pointer())
+    if entry is not None and entry[0] == key:
+        return entry[1]
+    verts = [v.co.copy() for v in mesh.vertices]
+    polys = [tuple(p.vertices) for p in mesh.polygons]
+    bvh = BVHTree.FromPolygons(verts, polys, all_triangles=False, epsilon=0.0)
+    _raw_bvh_cache[obj.as_pointer()] = (key, bvh)
+    return bvh
+
 # ===== OPTIMIZED RAYCAST FUNCTIONS =====
 
 def get_face_edges_from_raycast_optimized(context, event, use_depsgraph=False):
@@ -124,20 +150,27 @@ def get_face_edges_from_raycast_optimized(context, event, use_depsgraph=False):
         if not _point_in_object_bounds(ray_origin, view_vector, obj):
             continue
             
-        # Get evaluated object
-        obj_eval = obj.evaluated_get(depsgraph)
-        if not obj_eval.data:
-            continue
-        
         # Transform ray to object space
         matrix_inv = obj.matrix_world.inverted()
         ray_origin_local = matrix_inv @ ray_origin
         ray_direction_local = matrix_inv.to_3x3() @ view_vector
         
-        # Perform raycast
-        hit, location_local, normal_local, face_index = obj_eval.ray_cast(
-            ray_origin_local, ray_direction_local
-        )
+        if use_depsgraph:
+            # Evaluated mesh: indices match obj.evaluated_get(depsgraph).data
+            obj_eval = obj.evaluated_get(depsgraph)
+            if not obj_eval.data:
+                continue
+            hit, location_local, normal_local, face_index = obj_eval.ray_cast(
+                ray_origin_local, ray_direction_local
+            )
+        else:
+            # Raw mesh: indices must match obj.data, so cast at its own BVH
+            if ray_direction_local.length_squared == 0.0:
+                continue
+            location_local, normal_local, face_index, _dist = _get_raw_bvh(obj).ray_cast(
+                ray_origin_local, ray_direction_local.normalized()
+            )
+            hit = location_local is not None
         
         if hit:
             # Transform back to world space
@@ -1278,7 +1311,22 @@ def get_connected_coplanar_faces(obj, start_face_index, angle_tolerance_radians,
     return coplanar_indices
 
 def ensure_cbb_collection(context):
-    """Ensure the CBB_Collision collection exists and return it"""
+    """Return the collection new collision objects go into.
+
+    With the "Create in Active Collection" preference on, that is the active
+    collection of the view layer (falls back to the named collection when the
+    active one is excluded from the view layer). Otherwise the named
+    collision collection, created if missing.
+    """
+    try:
+        prefs = context.preferences.addons["Cursor_BBox"].preferences
+    except (KeyError, AttributeError):
+        prefs = None
+    if prefs is not None and getattr(prefs, "use_active_collection", True):
+        alc = context.view_layer.active_layer_collection
+        if alc is not None and not alc.exclude:
+            return alc.collection
+
     collection_name = context.scene.cursor_bbox_collection_name
     
     # Check if collection exists
@@ -1290,6 +1338,39 @@ def ensure_cbb_collection(context):
     context.scene.collection.children.link(new_collection)
     return new_collection
 
+def collision_rgba(scene):
+    """Collision colour with the opacity setting as alpha (RGBA list)."""
+    rgb = getattr(scene, "cursor_bbox_material_color", (1.0, 0.5, 0.0))
+    alpha = getattr(scene, "cursor_bbox_material_alpha", 0.7)
+    return list(rgb) + [float(alpha)]
+
+
+def apply_collision_material_color(mat, rgba):
+    """Write colour and opacity to the collision material.
+
+    The alpha goes to the viewport display colour (Solid mode, Material
+    colour), to the Principled BSDF Alpha input and to the blended render
+    method (Material Preview / EEVEE), so the geometry under a collision
+    shape stays readable in every shading mode.
+    """
+    mat.diffuse_color = rgba
+    if mat.use_nodes:
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf:
+            bsdf.inputs['Base Color'].default_value = list(rgba[:3]) + [1.0]
+            alpha_input = bsdf.inputs.get('Alpha')
+            if alpha_input is not None:
+                alpha_input.default_value = rgba[3]
+    translucent = rgba[3] < 1.0
+    try:
+        if hasattr(mat, "surface_render_method"):
+            mat.surface_render_method = 'BLENDED' if translucent else 'DITHERED'
+        elif hasattr(mat, "blend_method"):
+            mat.blend_method = 'BLEND' if translucent else 'OPAQUE'
+    except Exception as e:
+        print(f"Cursor BBox: cannot set material blend mode: {e}")
+
+
 def ensure_cbb_material(context):
     """Ensure the Cursor BBox Material exists and return it"""
     mat_name = "Cursor BBox Material"
@@ -1299,13 +1380,9 @@ def ensure_cbb_material(context):
         mat = bpy.data.materials.new(name=mat_name)
         mat.use_nodes = True
         
-    # Ensure it uses the color from properties
-    if mat.use_nodes and hasattr(context.scene, "cursor_bbox_material_color"):
-        bsdf = mat.node_tree.nodes.get("Principled BSDF")
-        if bsdf:
-            color = list(context.scene.cursor_bbox_material_color) + [1.0]
-            bsdf.inputs['Base Color'].default_value = color
-            mat.diffuse_color = color
+    # Ensure it uses the color and opacity from properties
+    if hasattr(context.scene, "cursor_bbox_material_color"):
+        apply_collision_material_color(mat, collision_rgba(context.scene))
             
     return mat
 
@@ -1328,8 +1405,8 @@ def assign_object_styles(context, obj):
         # But use getattr with default to be safe against attribute errors
         color_prop = getattr(context.scene, "cursor_bbox_material_color", (1.0, 0.5, 0.0))
         # Ensure it's a list/tuple
-        color = list(color_prop) + [1.0]
-        obj.color = color
+        # Alpha = the opacity setting: visible in Solid mode with Object colour.
+        obj.color = list(color_prop) + [float(getattr(context.scene, "cursor_bbox_material_alpha", 0.7))]
     except Exception as e:
         print(f"Failed to assign object color: {e}")
 
@@ -1629,6 +1706,78 @@ def get_faces_to_process(obj, face_idx, use_coplanar, coplanar_angle_rad, use_de
         return coplanar_indices if coplanar_indices else {face_idx}
     else:
         return {face_idx}
+
+# ===== TRIANGULATE MODIFIER SUSPENSION =====
+
+# (object name, modifier name) of every Triangulate modifier turned off by
+# suspend_triangulate() and not yet restored.
+_suspended_triangulate = []
+
+
+def suspend_triangulate(context, objects=None):
+    """Hide Triangulate modifiers in the viewport for a modal session.
+
+    Face picking works on the depsgraph-evaluated mesh, so a Triangulate
+    modifier makes every pick land on a triangle instead of the authored
+    polygon. Blender cannot evaluate only part of a modifier stack, so the
+    modifier is switched off (``show_viewport``) while the modal runs; the
+    rest of the stack is still evaluated. ``restore_triangulate`` puts it back.
+
+    *objects* defaults to the selected objects plus the active one.
+    Returns True when at least one modifier was switched off.
+    """
+    if objects is None:
+        objects = list(context.selected_objects)
+        if context.active_object is not None:
+            objects.append(context.active_object)
+
+    _raw_bvh_cache.clear()  # a new modal session starts here
+    changed = False
+    for obj in objects:
+        if obj is None or obj.type != 'MESH':
+            continue
+        for mod in obj.modifiers:
+            if mod.type == 'TRIANGULATE' and mod.show_viewport:
+                try:
+                    mod.show_viewport = False
+                except Exception as e:
+                    print(f"Cursor BBox: cannot suspend {obj.name}.{mod.name}: {e}")
+                    continue
+                _suspended_triangulate.append((obj.name, mod.name))
+                changed = True
+
+    if changed:
+        # Re-evaluate now so the very next raycast sees the untriangulated mesh.
+        context.view_layer.update()
+        _raycast_cache.clear()
+        get_snap_elements_cached.cache_clear()
+    return changed
+
+
+def restore_triangulate(context=None):
+    """Switch back on every Triangulate modifier hidden by suspend_triangulate."""
+    _raw_bvh_cache.clear()
+    if not _suspended_triangulate:
+        return
+    for obj_name, mod_name in _suspended_triangulate:
+        obj = bpy.data.objects.get(obj_name)
+        mod = obj.modifiers.get(mod_name) if obj is not None else None
+        if mod is None:
+            continue  # object or modifier removed during the session
+        try:
+            mod.show_viewport = True
+        except Exception as e:
+            print(f"Cursor BBox: cannot restore {obj_name}.{mod_name}: {e}")
+    _suspended_triangulate.clear()
+    _raycast_cache.clear()
+    get_snap_elements_cached.cache_clear()
+    if context is None:
+        context = bpy.context
+    try:
+        context.view_layer.update()
+    except Exception:
+        pass
+
 
 # ===== MESH EVALUATION UTILITIES =====
 

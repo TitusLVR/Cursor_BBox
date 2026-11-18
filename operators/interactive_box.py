@@ -4,6 +4,8 @@ from mathutils import Vector, Matrix
 from math import radians, degrees
 from ..functions.utils import (
     restore_selection_state,
+    suspend_triangulate,
+    restore_triangulate,
     set_cursor_rotation_to_principal_plane,
     CURSOR_PLANE_ALIGNMENTS,
     get_face_edges_from_raycast,
@@ -250,6 +252,7 @@ class CursorBBox_OT_interactive_box(BrushMarkingMixin, bpy.types.Operator):
     
     def cleanup_all_instances(self, context):
         """Clean up all temporary collection instances."""
+        restore_triangulate(context)
         for obj, instance_info in self.instance_data.items():
             cleanup_collection_instance_temp(context, instance_info)
         self.instance_data.clear()
@@ -506,7 +509,7 @@ class CursorBBox_OT_interactive_box(BrushMarkingMixin, bpy.types.Operator):
             restore_selection_state(context, self._restore_selected, self._restore_active)
             if hasattr(self, 'hud_ctl') and self.hud_ctl is not None:
                 self.hud_ctl.detach(context)
-            return {'CANCELLED'}
+            return {'FINISHED'}  # not CANCELLED: objects made in this modal need an undo step, or a later Ctrl+Z crashes Blender
 
         # Finished (RMB)
         if event.type == 'RIGHTMOUSE':
@@ -1133,6 +1136,7 @@ class CursorBBox_OT_interactive_box(BrushMarkingMixin, bpy.types.Operator):
             enable_face_marking()
             self._brush_init(context)
             self._setup_hud(context)
+            suspend_triangulate(context, self.original_selected_objects)
             context.window_manager.modal_handler_add(self)
             return {'RUNNING_MODAL'}
         else:

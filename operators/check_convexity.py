@@ -459,6 +459,77 @@ def fix_invalid_faces(mesh_obj, area_threshold=1e-6, weld_distance=0.0,
         bm.free()
 
 
+# Outcome of every auto_fix_new_hull() call since the last
+# pop_auto_fix_summary(): dicts with 'name', 'fixed', 'pieces', 'failing'.
+_auto_fix_log = []
+
+
+def auto_fix_new_hull(context, obj):
+    """Check a freshly created hull object and repair it when it fails.
+
+    Runs the same policy as Check Convexity and, on failure, the same repair
+    as Fix Convexity (degenerate faces, weld, normals, hull rebuild, lopsided
+    split), so the user does not have to run both by hand after every hull.
+    Controlled by the scene's ``cursor_bbox_hull_auto_fix`` toggle. Never
+    raises: a failure here must not lose the hull that was just created.
+    """
+    scene = context.scene
+    if not getattr(scene, "cursor_bbox_hull_auto_fix", True):
+        return
+    if obj is None or obj.type != 'MESH':
+        return
+    if not ensure_geometry():
+        print("Cursor BBox: auto convexity fix skipped - " + GEOMETRY_IMPORT_ERROR)
+        return
+    try:
+        # The policy is evaluated on exported (world) coordinates, and a new
+        # object's matrix_world is stale until the depsgraph runs.
+        context.view_layer.update()
+        if check_mesh_convexity(obj).is_clean:
+            _auto_fix_log.append({'name': obj.name, 'fixed': False, 'pieces': 1, 'failing': 0})
+            return
+        _degen, _welded, _normals, remaining, _rebuilt = fix_invalid_faces(
+            obj,
+            getattr(scene, "cursor_bbox_fix_area_threshold", 1e-6),
+            getattr(scene, "cursor_bbox_fix_weld_distance", 0.0001),
+            True,
+        )
+        pieces = [obj]
+        if remaining.centroid and remaining.structural == 0:
+            created = _split_lopsided_object(obj)
+            if created:
+                pieces += created
+                context.view_layer.update()
+        failing = sum(1 for piece in pieces if not check_mesh_convexity(piece).is_clean)
+        _auto_fix_log.append({'name': obj.name, 'fixed': True,
+                              'pieces': len(pieces), 'failing': failing})
+    except Exception as e:
+        print(f"Cursor BBox: auto convexity fix failed on {obj.name}: {e}")
+        _auto_fix_log.append({'name': obj.name, 'fixed': False, 'pieces': 1, 'failing': 1})
+
+
+def pop_auto_fix_summary():
+    """``(level, message)`` for the hulls auto-checked since the last call, or
+    None when nothing needed repair. ``level`` is 'INFO' or 'WARNING'."""
+    log = list(_auto_fix_log)
+    _auto_fix_log.clear()
+    fixed = [e for e in log if e['fixed']]
+    failing = [e for e in log if e['failing']]
+    if not fixed and not failing:
+        return None
+    parts = []
+    if fixed:
+        extra = sum(e['pieces'] - 1 for e in fixed)
+        text = f"{len(fixed)} of {len(log)} hull(s) auto-fixed"
+        if extra:
+            text += f" (+{extra} piece(s) from lopsided split)"
+        parts.append(text)
+    if failing:
+        names = ", ".join(e['name'] for e in failing[:5])
+        parts.append(f"{len(failing)} still fail the convexity check: {names}")
+    return ('WARNING' if failing else 'INFO'), "Convexity: " + "; ".join(parts)
+
+
 class CursorBBox_OT_fix_convexity(bpy.types.Operator):
     """Delete degenerate faces, weld vertices, and recalculate normals"""
     bl_idname = "cursor_bbox.fix_convexity"

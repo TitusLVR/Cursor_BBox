@@ -244,6 +244,7 @@ class CursorBBox_PT_main(bpy.types.Panel):
         col.separator()
         col.prop(scene, 'cursor_bbox_use_material', text="Use Material")
         col.prop(scene, 'cursor_bbox_material_color', text="Color")
+        col.prop(scene, 'cursor_bbox_material_alpha', text="Opacity", slider=True)
         
         if scene.cursor_bbox_select_coplanar:
             sub = col.column(align=True)
@@ -256,7 +257,17 @@ class CursorBBox_PT_main(bpy.types.Panel):
         row.alignment = 'LEFT'
         row.label(text="Naming & Collection", icon='OUTLINER_COLLECTION')
         
+        prefs = None
+        try:
+            prefs = context.preferences.addons[__package__.split('.')[0]].preferences
+        except (KeyError, AttributeError):
+            pass
+        use_active = bool(prefs and prefs.use_active_collection)
+        if prefs is not None:
+            col.prop(prefs, 'use_active_collection', text="Use Active Collection", toggle=True)
+
         row = col.row(align=True)
+        row.enabled = not use_active
         row.prop(scene, 'cursor_bbox_collection_name', text="Collection")
         row.operator("cursor_bbox.use_active_collection", text="", icon='EYEDROPPER')
         col.prop(scene, 'cursor_bbox_name_box', text="Bounding Box")
@@ -276,6 +287,7 @@ class CursorBBox_PT_main(bpy.types.Panel):
         if scene.cursor_bbox_hull_dissolve_angle > 0:
             col.prop(scene, 'cursor_bbox_hull_reconvex', text="Re-Convex After Dissolve", toggle=True)
 
+        col.prop(scene, 'cursor_bbox_hull_auto_fix', text="Auto Check & Fix Convexity", toggle=True)
         col.prop(scene, 'cursor_bbox_hull_use_triangulate', text="Triangulate", toggle=True)
         
         # Show triangulation method options only if triangulation is enabled
