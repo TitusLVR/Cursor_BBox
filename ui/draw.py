@@ -481,16 +481,6 @@ def disable_brush_circle(state):
     state.brush_circle = None
 
 
-def _split_batch(gpu_manager, shader, key, kind, verts):
-    """Batch cached under *key* without per-draw hashing (piece geometry is
-    immutable; a changed piece gets a new key)."""
-    batch = gpu_manager.batch_cache.get(key)
-    if batch is None and verts:
-        batch = batch_for_shader(shader, kind, {"pos": verts})
-        gpu_manager.batch_cache[key] = batch
-    return batch
-
-
 def _split_view():
     """``(signature, is_perspective, vector)`` of the region being drawn, or None.
 
@@ -514,9 +504,10 @@ def _split_view():
         return None
 
 
-def _split_fill_colors(item, view):
+def _split_fill_colors(item, view, back_factor):
     """Per-vertex RGBA for a piece's flat tri list: one colour per triangle,
-    alpha faded by how the triangle faces the viewer."""
+    alpha faded by how the triangle faces the viewer (back faces get
+    *back_factor* of the base alpha)."""
     from ..functions.hull_split import facing_alpha
     r, g, b = item['rgb']
     base = item['fill_alpha']
@@ -536,23 +527,56 @@ def _split_fill_colors(item, view):
             facing = n.dot(d) / length if length > 1e-12 else 0.0
         else:
             facing = n.dot(vec)
-        col = (r, g, b, facing_alpha(facing, base))
+        col = (r, g, b, facing_alpha(facing, base, back_factor))
         colors.extend((col, col, col))
     return colors
 
 
-def _split_fill_batch(gpu_manager, shader, item, view, view_id):
-    """Colour batch of one piece, rebuilt only when the view or its look changed."""
-    tris = item['tris']
-    if not tris:
+def _split_edge_colors(item, view, back_factor):
+    """Per-vertex RGBA for a piece's flat edge list: the role's edge colour,
+    with the alpha of back edges (both adjacent faces facing away from the
+    viewer) multiplied by *back_factor*."""
+    from ..functions.hull_split import edge_is_back
+    r, g, b, a = item['edge']
+    edges = item['edges']
+    normals = item.get('edge_normals') or ()
+    count = len(edges) // 2
+    front = (r, g, b, a)
+    if view is None or len(normals) != count:
+        return [front] * (count * 2)
+    back = (r, g, b, a * back_factor)
+    _sig, persp, vec = view
+    colors = []
+    for k in range(count):
+        n1, n2 = normals[k]
+        if persp:
+            d = vec - (edges[2 * k] + edges[2 * k + 1]) * 0.5
+            length = d.length
+            if length > 1e-12:
+                d = d / length
+        else:
+            d = vec
+        col = back if edge_is_back(n1.dot(d), n2.dot(d)) else front
+        colors.append(col)
+        colors.append(col)
+    return colors
+
+
+def _split_look_sig(item, view, back_edges, back_faces):
+    """What a piece's fill / edge colours depend on."""
+    return (view[0] if view else None, item['role'], item['rgb'], item['fill_alpha'],
+            item['edge'], back_edges, back_faces)
+
+
+def _split_color_batch(gpu_manager, shader, key, kind, verts, sig, make_colors):
+    """Per-vertex colour batch cached under *key*, rebuilt only when *sig*
+    (view and look) changed."""
+    if not verts:
         return None
-    key = f"split_fill_{item['key']}_{view_id}"
-    sig = (view[0] if view else None, item['role'], item['rgb'], item['fill_alpha'])
     batch = gpu_manager.batch_cache.get(key)
     if batch is not None and gpu_manager.last_data_hashes.get(key) == sig:
         return batch
-    batch = batch_for_shader(shader, 'TRIS',
-                             {"pos": tris, "color": _split_fill_colors(item, view)})
+    batch = batch_for_shader(shader, kind, {"pos": verts, "color": make_colors()})
     gpu_manager.batch_cache[key] = batch
     gpu_manager.last_data_hashes[key] = sig
     return batch
@@ -562,17 +586,21 @@ def draw_split_overlay(gpu_manager, split_overlay):
     """Draw split-mode pieces and the cutting plane (POST_VIEW).
 
     ``split_overlay`` is ``{'pieces': [item], 'plane': {'tris', 'border'} or
-    None}`` or None, items from ``functions.split.overlay_geometry``. Fills
-    are drawn without depth test so pieces stay visible through the source
-    mesh; their alpha fades with how each triangle faces the viewer.
+    None, 'backface_edges', 'backface_faces'}`` or None, items from
+    ``functions.split.overlay_geometry``. Fills are drawn without depth test
+    so pieces stay visible through the source mesh; their alpha fades with
+    how each triangle faces the viewer. Edges whose two faces both face away
+    are dimmed by ``backface_edges``, back-face fills by ``backface_faces``.
     """
     if not split_overlay:
         return
     pieces = split_overlay.get('pieces') or []
     plane = split_overlay.get('plane')
+    back_edges = split_overlay.get('backface_edges', 0.25)
+    back_faces = split_overlay.get('backface_faces', 0.12)
 
     # Drop batches of pieces that no longer exist
-    # (keys: split_fill_<uid>_<view>, split_edges_<uid>).
+    # (keys: split_fill_<uid>_<view>, split_edges_<uid>_<view>).
     live = {str(item['key']) for item in pieces}
     stale = []
     for k in gpu_manager.batch_cache:
@@ -604,33 +632,40 @@ def draw_split_overlay(gpu_manager, split_overlay):
         # Soft translucent fills, visible through the mesh.
         gpu.state.depth_test_set('NONE')
         smooth.bind()
-        for item in pieces:
-            batch = _split_fill_batch(gpu_manager, smooth, item, view, view_id)
+        sigs = [_split_look_sig(item, view, back_edges, back_faces) for item in pieces]
+        for item, sig in zip(pieces, sigs):
+            batch = _split_color_batch(
+                gpu_manager, smooth, f"split_fill_{item['key']}_{view_id}", 'TRIS',
+                item['tris'], sig,
+                lambda item=item: _split_fill_colors(item, view, back_faces))
             if batch:
                 batch.draw(smooth)
 
-        shader.bind()
         if plane:
+            shader.bind()
             shader.uniform_float("color", (0.55, 0.8, 1.0, 0.06))
             batch_for_shader(shader, 'TRIS', {"pos": plane['tris']}).draw(shader)
 
         # Edges: inactive pieces respect depth; hovered, active and preview
-        # outlines are always visible.
+        # outlines are always visible. Back edges are dimmed in both passes.
+        smooth.bind()
         for on_top in (False, True):
             gpu.state.depth_test_set('NONE' if on_top else 'LESS_EQUAL')
-            for item in pieces:
+            for item, sig in zip(pieces, sigs):
                 if bool(item['edge_on_top']) != on_top:
                     continue
-                batch = _split_batch(gpu_manager, shader, f"split_edges_{item['key']}",
-                                     'LINES', item['edges'])
+                batch = _split_color_batch(
+                    gpu_manager, smooth, f"split_edges_{item['key']}_{view_id}", 'LINES',
+                    item['edges'], sig,
+                    lambda item=item: _split_edge_colors(item, view, back_edges))
                 if batch:
                     gpu.state.line_width_set(item['edge_width'])
-                    shader.uniform_float("color", item['edge'])
-                    batch.draw(shader)
+                    batch.draw(smooth)
 
         if plane:
             gpu.state.depth_test_set('NONE')
             gpu.state.line_width_set(1.0)
+            shader.bind()
             shader.uniform_float("color", (0.55, 0.8, 1.0, 0.35))
             batch_for_shader(shader, 'LINES', {"pos": plane['border']}).draw(shader)
     finally:

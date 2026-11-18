@@ -199,6 +199,21 @@ class HelperTests(unittest.TestCase):
         self.assertAlmostEqual(hs.facing_alpha(0.0, 0.2), 0.2 * 0.12)
         self.assertAlmostEqual(hs.facing_alpha(-1.0, 0.2), 0.2 * 0.12)
 
+    def test_facing_alpha_back_factor(self):
+        self.assertAlmostEqual(hs.facing_alpha(-0.5, 0.2, 0.5), 0.1)
+        self.assertAlmostEqual(hs.facing_alpha(0.0, 0.2, 0.0), 0.0)
+        # The back factor does not touch front faces.
+        self.assertAlmostEqual(hs.facing_alpha(1.0, 0.2, 0.0), 0.2)
+
+    def test_edge_is_back(self):
+        self.assertTrue(hs.edge_is_back(-0.5, -0.1))
+        self.assertTrue(hs.edge_is_back(0.0, -1.0))
+        self.assertTrue(hs.edge_is_back(0.0, 0.0))
+        # Silhouette and front edges are not back edges.
+        self.assertFalse(hs.edge_is_back(0.3, -0.3))
+        self.assertFalse(hs.edge_is_back(-0.3, 0.3))
+        self.assertFalse(hs.edge_is_back(0.5, 0.2))
+
     def test_plane_key_same_for_points_of_one_plane(self):
         n = (0.0, 0.0, 1.0)
         a = hs.plane_key(n, (0.0, 0.0, 0.5), 2.0)

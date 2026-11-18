@@ -157,6 +157,36 @@ class CursorBBoxPreferences(AddonPreferences):
         description="Show the HUD and Help overlay theme settings",
         default=False
     )
+    show_split_overlay: BoolProperty(
+        name="Split / Islands Overlay",
+        description="Show the Split / Islands overlay drawing settings",
+        default=False
+    )
+
+    # Split / Islands overlay (Interactive Hull, K / L)
+    split_backface_edges: FloatProperty(
+        name="Back-Face Edges",
+        description=(
+            "Dims the parts of a Split / Islands hull that face away from the viewer: "
+            "alpha multiplier for hull edges whose both faces face away"
+        ),
+        subtype='FACTOR',
+        default=0.25,
+        min=0.0,
+        max=1.0
+    )
+
+    split_backface_faces: FloatProperty(
+        name="Back-Face Faces",
+        description=(
+            "Dims the parts of a Split / Islands hull that face away from the viewer: "
+            "multiplier of the front base fill alpha for hull faces that face away"
+        ),
+        subtype='FACTOR',
+        default=0.12,
+        min=0.0,
+        max=1.0
+    )
 
     # BBox preview settings - Updated to #FFFFFF
     bbox_preview_enabled: BoolProperty(
@@ -408,6 +438,13 @@ class CursorBBoxPreferences(AddonPreferences):
                 if body is not None:
                     body.prop(self, "bbox_show_wire")
                     body.prop(self, "bbox_show_all_edges")
+
+                body = _pref_rollout(grp, self, "show_split_overlay",
+                                     "Split / Islands overlay",
+                                     icon='MOD_EXPLODE', split=True)
+                if body is not None:
+                    body.prop(self, "split_backface_edges")
+                    body.prop(self, "split_backface_faces")
 
             layout.separator()
 

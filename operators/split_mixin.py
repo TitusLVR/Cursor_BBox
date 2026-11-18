@@ -5,11 +5,15 @@ Both modes share one piece list (overlay, undo, picking, merging, deleting,
 Space to create one hull object per piece); ``split_kind`` selects the tools.
 
 * Split mode (``K``) shows a translucent convex hull of the whole selection
-  (or of the marked faces). Hovering a face puts the 3D cursor on it and
-  previews the two hulls a cut of the ACTIVE piece by the plane through the
-  cursor (cursor Z, or X / Y with ``R``) would produce; LMB makes that cut.
-  Each side's hull is rebuilt from the source polygons on that side. ``L``
-  explodes the active piece into islands and switches to Islands mode.
+  (or of the marked faces). It has two states (``split_state``):
+  CUT: hovering a face puts the 3D cursor on it and previews the two hulls a
+  cut of the ACTIVE piece by the plane through the cursor (cursor Z, or X / Y
+  with ``R``) would produce; LMB makes that cut. Each side's hull is rebuilt
+  from the source polygons on that side.
+  PICK: entered after a keep-both cut or slabs; no plane, no preview, every
+  piece filled evenly, the new pieces outlined; LMB on a piece makes it
+  active and goes back to CUT. ``TAB`` toggles the two by hand.
+  ``L`` explodes the active piece into islands and switches to Islands mode.
 * Islands mode (``L``) explodes the source into its loose islands and merges
   the ones that sit close together and merge cheaply; the merge thresholds
   stay live (Ctrl / Shift / Ctrl+Shift+Wheel) until the pieces are edited by
@@ -65,10 +69,12 @@ from ..ui.hud.items import HUDItem, HUDParam
 
 SPLIT_HELP_ITEMS = [
     HUDItem("Enter / exit (discard)", "K / ESC"),
-    HUDItem("Cut active piece (keep both)", "LMB"),
+    HUDItem("Cut: cut active piece, then pick a piece", "LMB"),
     HUDItem("Cut, keep back / keep front", "Ctrl+LMB / Ctrl+Shift+LMB"),
+    HUDItem("Pick: make piece active, back to cutting", "LMB / RMB"),
+    HUDItem("Toggle cut / pick piece", "TAB"),
     HUDItem("Make piece under mouse active", "RMB"),
-    HUDItem("Merge piece under mouse into active", "Shift+RMB"),
+    HUDItem("Merge piece under mouse into active", "Shift+RMB / Shift+LMB (pick)"),
     HUDItem("Plane: face / across X / across Y", "R"),
     HUDItem("Freeze plane", "F"),
     HUDItem("Plane offset 2% / 0.2%", "Alt+Wheel / Alt+Shift+Wheel"),
@@ -126,6 +132,11 @@ class SplitMixin:
         self.split_mode = False
         # 'SPLIT' (plane cutting) or 'ISLANDS' (island auto-merge); same pieces.
         self.split_kind = 'SPLIT'
+        # Split kind only: 'CUT' (plane, preview, LMB cuts) or 'PICK' (choose
+        # the piece to cut next). Islands kind ignores it.
+        self.split_state = 'CUT'
+        # uids of the pieces made by the last cut / slabs, outlined in PICK.
+        self._split_fresh = set()
         self.split_pieces = []
         self.split_active = 0
         self.split_axis = 0
@@ -160,8 +171,16 @@ class SplitMixin:
     def _split_shutdown(self):
         self.split_mode = False
         self.split_kind = 'SPLIT'
+        self.split_state = 'CUT'
+        self._split_fresh = set()
         self.split_pieces = []
         self._split_hover = None
+        try:
+            window = bpy.context.window
+            if window is not None:
+                window.cursor_modal_restore()
+        except Exception as e:
+            print(f"Split: could not restore the mouse cursor: {e}")
         self._split_end_auto()
         self._split_preview_reset()
         timer = getattr(self, '_split_timer', None)
@@ -177,12 +196,47 @@ class SplitMixin:
     def _split_mode_label(self):
         """Mode name for the HUD, or None outside split mode."""
         if getattr(self, 'split_mode', False):
-            return "ISLANDS" if self._split_islands() else "SPLIT"
+            if self._split_islands():
+                return "ISLANDS"
+            return "SPLIT: PICK PIECE" if self._split_picking() else "SPLIT: CUT"
         return None
 
     def _split_islands(self):
         """True in Islands mode (no cutting plane)."""
         return getattr(self, 'split_kind', 'SPLIT') == 'ISLANDS'
+
+    def _split_picking(self):
+        """True in Split mode's piece-selection state (no plane, no preview)."""
+        return (not self._split_islands()
+                and getattr(self, 'split_state', 'CUT') == 'PICK')
+
+    def _split_update_cursor(self, context):
+        """Mouse cursor as mode feedback: knife while cutting, hand while
+        picking pieces (Split PICK, Islands); restored outside split mode.
+        Never raises."""
+        try:
+            window = context.window if context is not None else bpy.context.window
+            if window is None:
+                return
+            if not getattr(self, 'split_mode', False):
+                window.cursor_modal_restore()
+            elif self._split_islands() or self._split_picking():
+                window.cursor_modal_set('HAND')
+            else:
+                window.cursor_modal_set('KNIFE')
+        except Exception as e:
+            print(f"Split: could not set the mouse cursor: {e}")
+
+    def _split_set_state(self, context, state):
+        """Switch Split mode between 'CUT' and 'PICK' (PICK needs 2+ pieces).
+        Leaving PICK forgets the fresh pieces."""
+        if state == 'PICK' and len(self.split_pieces) < 2:
+            state = 'CUT'
+        if state != 'PICK':
+            self._split_fresh = set()
+        self.split_state = state
+        self._split_preview_reset()
+        self._split_update_cursor(context)
 
     def _split_add_hud_params(self, hud):
         visible = lambda: getattr(self, 'split_mode', False)
@@ -312,26 +366,34 @@ class SplitMixin:
         return self._split_compute_cut(plane, key)
 
     def _split_refresh(self, context):
-        if self._split_islands():
-            # Islands mode has no cutting plane: no plane quad, no cut preview.
+        if self._split_picking() and len(self.split_pieces) < 2:
+            # A single piece has nothing to pick from: always cutting.
+            self._split_set_state(context, 'CUT')
+        picking = self._split_picking()
+        if self._split_islands() or picking:
+            # Islands mode and piece picking have no cutting plane: no plane
+            # quad, no cut preview.
             plane, preview = None, None
         else:
             self._split_update_preview(context)
             plane = self._split_plane(context)
             preview = None if self._split_preview_dirty else self._split_preview_pieces
         update_split_overlay(overlay_geometry(
-            self.split_pieces, self.split_active, self._split_hover, plane, preview))
+            self.split_pieces, self.split_active, self._split_hover, plane, preview,
+            pick=picking, fresh=self._split_fresh if picking else ()))
         if context.area is not None:
             context.area.tag_redraw()
 
     def _split_snapshot(self):
         return (tuple((p.polys, p.color_index) for p in self.split_pieces),
-                self.split_active, self.split_kind)
+                self.split_active, self.split_kind, self.split_state)
 
     def _split_restore(self, context, snap):
-        pieces_data, active, kind = snap
+        pieces_data, active, kind, state = snap
         self._split_end_auto()
         self.split_kind = kind
+        self.split_state = state
+        self._split_fresh = set()
         self._split_preview_reset()
         pieces = []
         for polys, color in pieces_data:
@@ -341,6 +403,9 @@ class SplitMixin:
         self.split_pieces = pieces
         self._split_set_active(min(active, max(0, len(pieces) - 1)))
         self._split_hover = self._split_pick(context)
+        if state == 'PICK' and len(pieces) < 2:
+            self.split_state = 'CUT'
+        self._split_update_cursor(context)
 
     def _split_enter(self, context, event, kind='SPLIT'):
         """Enter split mode with one piece; *kind* 'ISLANDS' then explodes it
@@ -358,6 +423,8 @@ class SplitMixin:
             return
         self.split_mode = True
         self.split_kind = kind
+        self.split_state = 'CUT'
+        self._split_fresh = set()
         self.split_pieces = [piece]
         self.split_offset = 0.0
         self.split_frozen = False
@@ -377,14 +444,15 @@ class SplitMixin:
         hide_hull_preview()
         clear_preview_faces()
         enable_split_overlay()
+        self._split_update_cursor(context)
         if kind == 'ISLANDS':
             self._split_hover = self._split_pick(context)
             self._split_explode(context, single_msg="Single island: nothing to merge")
             # The explode is the starting state of Islands mode, not an edit.
             self._split_undo.clear()
         else:
-            self.report({'INFO'}, "Split mode: hover a face, LMB cuts, RMB picks a piece. "
-                                  "Space create, K exit")
+            self.report({'INFO'}, "Split mode: hover a face, LMB cuts, then pick a piece. "
+                                  "TAB cut / pick, Space create, K exit")
         self._split_refresh(context)
 
     def _split_exit(self, context, message="Split mode off"):
@@ -431,7 +499,11 @@ class SplitMixin:
             self.split_pieces.insert(i + 1, back)
             sub = self._split_pick(context, pieces=[front, back])
             self._split_set_active(i + 1 if sub == 1 else i)
-            self.report({'INFO'}, f"Cut: {len(self.split_pieces)} pieces")
+            # Now choose the piece to cut next; the two new pieces are
+            # outlined until then (the visual confirmation of the cut).
+            self._split_set_state(context, 'PICK')
+            self._split_fresh = {front.uid, back.uid}
+            self.report({'INFO'}, f"Cut: {len(self.split_pieces)} pieces. Pick the piece to cut next")
         else:
             kept = back if keep == 'BACK' else front
             other = front if keep == 'BACK' else back
@@ -472,6 +544,34 @@ class SplitMixin:
             self._split_hover = idx
         self._split_refresh(context)
 
+    def _split_follow_mouse(self, context, event):
+        """Put the 3D cursor (the cutting plane) under the mouse, unless the
+        plane is frozen (entering CUT, so the plane does not lag one move)."""
+        if self.split_frozen or event is None:
+            return
+        try:
+            place_cursor_with_raycast_and_edge(
+                context, event, True, 0, preview=False, use_depsgraph=self.use_depsgraph)
+        except Exception as e:
+            print(f"Split: could not place the cursor: {e}")
+
+    def _split_pick_state_click(self, context, event, merge):
+        """LMB / RMB in Split mode's PICK state: a piece under the mouse
+        becomes active and cutting resumes; *merge* (Shift) merges it into
+        the active piece and stays in PICK. Nothing under the mouse: stay."""
+        idx = self._split_pick(context)
+        if idx is None:
+            self._split_refresh(context)
+            return
+        if merge:
+            self._split_merge(context, idx)
+        else:
+            self._split_set_active(idx)
+            self._split_hover = idx
+            self._split_set_state(context, 'CUT')
+            self._split_follow_mouse(context, event)
+        self._split_refresh(context)
+
     def _split_slabs(self, context, n):
         plane = self._split_plane(context)
         if plane is None or not self.split_pieces:
@@ -508,6 +608,8 @@ class SplitMixin:
         sub = self._split_pick(context, pieces=new_pieces)
         self._split_set_active(i + (sub if sub is not None else 0))
         self._split_after_change(context)
+        self._split_set_state(context, 'PICK')
+        self._split_fresh = {p.uid for p in new_pieces}
         skipped = len(slabs) - len(new_pieces)
         msg = f"Split into {len(new_pieces)} slabs"
         if skipped:
@@ -707,7 +809,7 @@ class SplitMixin:
         # Timer: compute a preview that was deferred (over budget). Never
         # consumed, so the host / HUD still see it.
         if etype == 'TIMER':
-            if not islands and self._split_preview_dirty:
+            if not islands and not self._split_picking() and self._split_preview_dirty:
                 self._split_update_preview(context, force=True)
                 self._split_refresh(context)
             return False
@@ -718,8 +820,9 @@ class SplitMixin:
                 hover = self._split_pick(context)
                 hover_changed = hover != self._split_hover
                 self._split_hover = hover
-                if islands:
-                    # No cutting plane: only the hover highlight follows the mouse.
+                if islands or self._split_picking():
+                    # No cutting plane (Islands, Split PICK): the 3D cursor
+                    # stays, only the hover highlight follows the mouse.
                     if hover_changed:
                         self._split_refresh(context)
                 elif not self.split_frozen:
@@ -740,7 +843,7 @@ class SplitMixin:
                 self._split_refresh(context)
                 return True
             if event.alt and not event.ctrl:
-                if not islands and self.split_pieces:
+                if not islands and not self._split_picking() and self.split_pieces:
                     ext = self.split_pieces[self.split_active].extent
                     step = ext * (0.002 if event.shift else 0.02)
                     self.split_offset += step if etype == 'WHEELUPMOUSE' else -step
@@ -753,6 +856,10 @@ class SplitMixin:
                 self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
                 if not event.ctrl:
                     self._split_pick_or_merge(context, merge=event.shift)
+            elif press and self._split_picking():
+                self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
+                if not event.ctrl:
+                    self._split_pick_state_click(context, event, merge=event.shift)
             elif press:
                 self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
                 if event.ctrl and event.shift:
@@ -766,13 +873,13 @@ class SplitMixin:
 
         if not press:
             # Releases of keys we own are swallowed; others (HUD etc.) fall through.
-            return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L'}
+            return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L', 'TAB'}
                              | _CONFIRM_KEYS | _BLOCKED_KEYS | set(_SLAB_KEYS))
 
         if etype == 'K' and islands:
             # Keep the pieces (and the live merge link until the next edit).
             self.split_kind = 'SPLIT'
-            self._split_preview_reset()
+            self._split_set_state(context, 'CUT')
             self.report({'INFO'}, "Split mode: cut pieces with planes")
             self._split_refresh(context)
             return True
@@ -780,7 +887,24 @@ class SplitMixin:
         if etype == 'L' and not islands:
             self._split_explode(context)
             self.split_kind = 'ISLANDS'
-            self._split_preview_reset()
+            self._split_set_state(context, 'CUT')
+            self._split_refresh(context)
+            return True
+
+        if etype == 'TAB':
+            if islands:
+                return True
+            if len(self.split_pieces) < 2:
+                self.report({'INFO'}, "Only one piece: nothing to pick")
+                return True
+            if self._split_picking():
+                self._split_set_state(context, 'CUT')
+                self._split_follow_mouse(context, event)
+                self.report({'INFO'}, "Split: cut the active piece")
+            else:
+                self._split_set_state(context, 'PICK')
+                self.report({'INFO'}, "Split: pick the piece to cut")
+            self._split_hover = self._split_pick(context)
             self._split_refresh(context)
             return True
 
@@ -793,7 +917,10 @@ class SplitMixin:
         if etype == 'RIGHTMOUSE':
             # Never finishes the modal in split mode: picks / merges a piece.
             self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
-            self._split_pick_or_merge(context, merge=event.shift)
+            if self._split_picking():
+                self._split_pick_state_click(context, event, merge=event.shift)
+            else:
+                self._split_pick_or_merge(context, merge=event.shift)
             return True
 
         if etype in _CONFIRM_KEYS:
@@ -839,6 +966,10 @@ class SplitMixin:
             return True
 
         if etype in _SLAB_KEYS:
+            if self._split_picking():
+                # No plane while picking: choose the piece to slab first.
+                self.report({'INFO'}, "Pick a piece first (LMB), or TAB to cut")
+                return True
             self._split_slabs(context, _SLAB_KEYS[etype])
             self._split_refresh(context)
             return True

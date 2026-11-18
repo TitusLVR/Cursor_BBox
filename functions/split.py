@@ -37,11 +37,11 @@ class Piece:
     """One convex piece of the decomposition."""
 
     __slots__ = ('polys', 'hull_verts', 'hull_tris', 'hull_edges', 'bvh',
-                 'tri_normals', 'tri_centers',
+                 'tri_normals', 'tri_centers', 'edge_normals',
                  'color_index', 'center', 'radius', 'extent', 'uid', 'volume')
 
     def __init__(self, polys, hull_verts, hull_tris, hull_edges, bvh, color_index,
-                 tri_normals=(), tri_centers=(), volume=0.0):
+                 tri_normals=(), tri_centers=(), volume=0.0, edge_normals=()):
         self.polys = polys
         self.hull_verts = hull_verts      # list of world-space Vectors
         self.hull_tris = hull_tris        # flat vertex list for 'TRIS', outward winding
@@ -51,6 +51,10 @@ class Piece:
         # centre per triangle of hull_tris, for the view-dependent fill fade.
         self.tri_normals = tri_normals
         self.tri_centers = tri_centers
+        # One ``(n1, n2)`` per edge of hull_edges: the outward unit normals of
+        # the two hull faces sharing it (repeated when it has only one), for
+        # the back-face edge fade.
+        self.edge_normals = edge_normals
         self.color_index = color_index
         center = Vector((0.0, 0.0, 0.0))
         for v in hull_verts:
@@ -76,8 +80,9 @@ def _points_eps(points):
 def _hull_data(points):
     """Convex hull of *points* (assumed solid) via bmesh.
 
-    Returns ``(hull_verts, faces, tris, tri_normals, tri_centers, edges)`` or
-    None when the hull has no faces. Raises on bmesh failure.
+    Returns ``(hull_verts, faces, tris, tri_normals, tri_centers, edges,
+    edge_normals)`` or None when the hull has no faces. Raises on bmesh
+    failure.
     """
     bm = bmesh.new()
     try:
@@ -95,6 +100,7 @@ def _hull_data(points):
             return None
         bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
         bm.verts.index_update()
+        bm.faces.index_update()
         hull_verts = [v.co.copy() for v in bm.verts]
         faces = [[v.index for v in f.verts] for f in bm.faces]
         hull_center = Vector((0.0, 0.0, 0.0))
@@ -104,7 +110,11 @@ def _hull_data(points):
         tris = []
         tri_normals = []
         tri_centers = []
+        # Outward unit normal per bmesh face (that of its first non-degenerate
+        # triangle), for the edges' adjacent-face normals.
+        face_normals = []
         for f, bm_face in zip(faces, bm.faces):
+            face_n = None
             for i in range(1, len(f) - 1):
                 a, b, c = hull_verts[f[0]], hull_verts[f[i]], hull_verts[f[i + 1]]
                 tc = (a + b + c) / 3.0
@@ -119,18 +129,33 @@ def _hull_data(points):
                     n = -n
                 if n.length_squared > 1e-30:
                     n.normalize()
+                    if face_n is None:
+                        face_n = n
                 else:
                     n = Vector((0.0, 0.0, 0.0))
                 tris.extend((a, b, c))
                 tri_normals.append(n)
                 tri_centers.append(tc)
+            if face_n is None:
+                face_n = Vector((0.0, 0.0, 0.0))
+            face_normals.append(face_n)
         edges = []
+        edge_normals = []
+        zero = Vector((0.0, 0.0, 0.0))
         for e in bm.edges:
             edges.append(hull_verts[e.verts[0].index])
             edges.append(hull_verts[e.verts[1].index])
+            linked = [face_normals[f.index] for f in e.link_faces
+                      if 0 <= f.index < len(face_normals)]
+            if not linked:
+                edge_normals.append((zero, zero))
+            elif len(linked) == 1:
+                edge_normals.append((linked[0], linked[0]))
+            else:
+                edge_normals.append((linked[0], linked[1]))
     finally:
         bm.free()
-    return hull_verts, faces, tris, tri_normals, tri_centers, edges
+    return hull_verts, faces, tris, tri_normals, tri_centers, edges, edge_normals
 
 
 def make_piece(polys, color_index):
@@ -145,13 +170,13 @@ def make_piece(polys, color_index):
         data = _hull_data(points)
         if data is None:
             return None
-        hull_verts, faces, tris, tri_normals, tri_centers, edges = data
+        hull_verts, faces, tris, tri_normals, tri_centers, edges, edge_normals = data
         bvh = BVHTree.FromPolygons(hull_verts, faces)
     except Exception as e:
         print(f"Split: failed to build piece hull: {e}")
         return None
     return Piece(polys, hull_verts, tris, edges, bvh, color_index, tri_normals, tri_centers,
-                 hs.tris_volume(tris))
+                 hs.tris_volume(tris), edge_normals)
 
 
 def hull_volume(points):
@@ -177,7 +202,8 @@ def piece_thickness(piece):
 def clone_piece(piece, color_index):
     """A new Piece (new uid) sharing *piece*'s geometry, with another colour."""
     return Piece(piece.polys, piece.hull_verts, piece.hull_tris, piece.hull_edges, piece.bvh,
-                 color_index, piece.tri_normals, piece.tri_centers, piece.volume)
+                 color_index, piece.tri_normals, piece.tri_centers, piece.volume,
+                 piece.edge_normals)
 
 
 # More islands than this are not auto-merged: every island becomes a piece.
@@ -333,13 +359,50 @@ def pick_piece(context, pieces, mouse):
 
 # Overlay roles, in draw order (later ones blend on top):
 # (fill base alpha, edge alpha, edge is white, edge width, edge drawn on top).
+# PICK / FRESH / PICK_HOVER are the Split mode's piece-selection state: an
+# even, stronger fill for every piece so the decomposition reads as blocks,
+# white outlines for the pieces of the last cut and the piece under the mouse.
 _ROLE_STYLE = {
     'INACTIVE': (0.10, 0.30, False, 1.0, False),
     'HOVER': (0.16, 0.55, False, 1.0, True),
     'ACTIVE': (0.20, 0.75, True, 1.75, True),
     'PREVIEW': (0.22, 0.75, True, 1.75, True),
+    'PICK': (0.22, 0.45, False, 1.0, False),
+    'FRESH': (0.22, 0.85, True, 1.75, True),
+    'PICK_HOVER': (0.38, 0.95, True, 2.0, True),
 }
-_ROLE_ORDER = {'INACTIVE': 0, 'HOVER': 1, 'ACTIVE': 2, 'PREVIEW': 2}
+_ROLE_ORDER = {'INACTIVE': 0, 'HOVER': 1, 'ACTIVE': 2, 'PREVIEW': 2,
+               'PICK': 0, 'FRESH': 1, 'PICK_HOVER': 2}
+
+# Back-face dimming defaults (addon preferences split_backface_edges /
+# split_backface_faces).
+BACKFACE_EDGES_DEFAULT = 0.25
+BACKFACE_FACES_DEFAULT = 0.12
+
+
+def _pref_factor(prefs, name, default):
+    """Preference *name* as a float in [0, 1], *default* when missing / bad."""
+    try:
+        value = float(getattr(prefs, name))
+    except Exception:
+        return default
+    if value != value:  # NaN
+        return default
+    return min(1.0, max(0.0, value))
+
+
+def backface_factors():
+    """``(edges, faces)`` back-face dimming factors from the addon preferences,
+    the defaults when they cannot be read."""
+    try:
+        from ..settings.preferences import get_preferences
+        prefs = get_preferences()
+    except Exception:
+        prefs = None
+    if prefs is None:
+        return BACKFACE_EDGES_DEFAULT, BACKFACE_FACES_DEFAULT
+    return (_pref_factor(prefs, 'split_backface_edges', BACKFACE_EDGES_DEFAULT),
+            _pref_factor(prefs, 'split_backface_faces', BACKFACE_FACES_DEFAULT))
 
 
 def _overlay_item(piece, role):
@@ -353,6 +416,7 @@ def _overlay_item(piece, role):
         'normals': piece.tri_normals,
         'centers': piece.tri_centers,
         'edges': piece.hull_edges,
+        'edge_normals': piece.edge_normals,
         'rgb': rgb,
         'fill_alpha': fill_alpha,
         'edge': (*edge_rgb, edge_alpha),
@@ -361,7 +425,7 @@ def _overlay_item(piece, role):
     }
 
 
-def overlay_geometry(pieces, active, hover, plane, preview=None):
+def overlay_geometry(pieces, active, hover, plane, preview=None, pick=False, fresh=()):
     """Data for ``draw_split_overlay``.
 
     *plane* is ``(origin, normal)`` or None. *preview* is ``(front, back)``,
@@ -369,23 +433,43 @@ def overlay_geometry(pieces, active, hover, plane, preview=None):
     they are drawn instead of the active piece. The hovered piece (when not
     the active one) is highlighted. The plane is a quad centred on the
     projection of the active piece's centre onto the plane.
+
+    *pick* (Split mode's piece-selection state) draws every piece evenly,
+    the hovered one strongest, the pieces whose uid is in *fresh* outlined,
+    and no active emphasis, plane or preview.
+
+    The back-face dimming factors from the addon preferences ride along as
+    ``'backface_edges'`` / ``'backface_faces'``.
     """
     items = []
-    for i, piece in enumerate(pieces):
-        if i == active:
-            if preview:
-                continue
-            role = 'ACTIVE'
-        elif i == hover:
-            role = 'HOVER'
-        else:
-            role = 'INACTIVE'
-        items.append(_overlay_item(piece, role))
-    if preview:
-        for piece in preview:
-            if piece is not None:
-                items.append(_overlay_item(piece, 'PREVIEW'))
+    if pick:
+        fresh = set(fresh or ())
+        for i, piece in enumerate(pieces):
+            if i == hover:
+                role = 'PICK_HOVER'
+            elif piece.uid in fresh:
+                role = 'FRESH'
+            else:
+                role = 'PICK'
+            items.append(_overlay_item(piece, role))
+        plane, preview = None, None
+    else:
+        for i, piece in enumerate(pieces):
+            if i == active:
+                if preview:
+                    continue
+                role = 'ACTIVE'
+            elif i == hover:
+                role = 'HOVER'
+            else:
+                role = 'INACTIVE'
+            items.append(_overlay_item(piece, role))
+        if preview:
+            for piece in preview:
+                if piece is not None:
+                    items.append(_overlay_item(piece, 'PREVIEW'))
     items.sort(key=lambda it: _ROLE_ORDER[it['role']])
+    back_edges, back_faces = backface_factors()
     plane_data = None
     if plane is not None and pieces and active is not None and 0 <= active < len(pieces):
         co = Vector(plane[0])
@@ -402,4 +486,5 @@ def overlay_geometry(pieces, active, hover, plane, preview=None):
                 'tris': [a, b, cc, a, cc, d],
                 'border': [a, b, b, cc, cc, d, d, a],
             }
-    return {'pieces': items, 'plane': plane_data}
+    return {'pieces': items, 'plane': plane_data,
+            'backface_edges': back_edges, 'backface_faces': back_faces}

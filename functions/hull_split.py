@@ -219,16 +219,24 @@ def is_solid(points: Sequence[Sequence[float]], eps: float) -> bool:
     return False
 
 
-def facing_alpha(facing: float, base: float) -> float:
+def facing_alpha(facing: float, base: float, back_factor: float = 0.12) -> float:
     """Fill alpha of a triangle for the split overlay.
 
     *facing* is the dot product of the triangle's outward unit normal with the
     unit direction to the viewer. Front faces fade from full *base* (facing
-    the viewer) to 35% of it (edge-on); back faces get a constant 12%.
+    the viewer) to 35% of it (edge-on); back faces get a constant
+    *back_factor* of it.
     """
     if facing > 0.0:
         return base * (0.35 + 0.65 * min(facing, 1.0))
-    return base * 0.12
+    return base * back_factor
+
+
+def edge_is_back(n1_dot_v: float, n2_dot_v: float) -> bool:
+    """True when a hull edge faces away from the viewer: both adjacent faces
+    do (``n . v <= 0`` for each, *v* towards the viewer). Silhouette edges
+    (one face front, one back) and front edges are not back edges."""
+    return n1_dot_v <= 0.0 and n2_dot_v <= 0.0
 
 
 def plane_key(normal: Sequence[float], origin: Sequence[float], extent_: float,
