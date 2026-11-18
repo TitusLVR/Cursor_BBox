@@ -50,17 +50,19 @@ The host must provide ``marked_faces``, ``original_selected_objects``,
 ``use_depsgraph``, ``point_mode``, ``thickness_mode``, ``pick_objects_mode``,
 ``_brush_pending`` / ``_brush_stroke`` and ``_brush_update_preview(context)``.
 """
+import math
 import time
 
 import bpy
 from bpy_extras import view3d_utils
-from mathutils import Vector
+from mathutils import Vector, geometry
 
 from ..functions.core import (
     enable_split_overlay_wrapper as enable_split_overlay,
     disable_split_overlay_wrapper as disable_split_overlay,
     update_split_overlay,
     clear_split_overlay,
+    clear_edge_highlight,
     hide_hull_preview,
     clear_preview_faces,
 )
@@ -93,6 +95,8 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Toggle cut / pick piece", "TAB"),
     HUDItem("Make piece under mouse active", "RMB"),
     HUDItem("Merge piece under mouse into active", "Shift+RMB / Shift+LMB (pick)"),
+    HUDItem("Hover a face / edge / vertex: cut by its plane / along the edge / "
+            "through the vertex", "Mouse"),
     HUDItem("Plane: face / across X / across Y", "R"),
     HUDItem("Freeze plane", "F"),
     HUDItem("Plane offset 2% / 0.2%", "Alt+Wheel / Alt+Shift+Wheel"),
@@ -142,7 +146,8 @@ _PREVIEW_BUDGET = 0.040
 _TIMER_INTERVAL = 0.1
 
 # Auto-merge parameter limits (see _split_wheel_param).
-_GAP_RANGE = (0.001, 1.0)
+# Merge gap: lower bound only (no upper limit, at the user's request).
+_GAP_MIN = 0.001
 _COST_RANGE = (0.0, 0.95)
 _THIN_START = 0.005
 _THIN_MAX = 0.5
@@ -158,6 +163,17 @@ _OWNED_MIN_RATIO = 0.25
 # The uncovered remainder is added only when its hull has at least this
 # fraction of the whole-selection hull volume.
 _REMAINDER_MIN_RATIO = 0.01
+
+# Split CUT state: the cutting plane snaps to the hovered face's vertex /
+# edge when the mouse is within these screen distances (pixels).
+_SNAP_VERT_PX = 12.0
+_SNAP_EDGE_PX = 10.0
+_SNAP_NAMES = {'FACE': "Face", 'EDGE': "Edge", 'VERTEX': "Vertex"}
+
+
+def _gap_label(gap):
+    """Merge gap for display: 3 decimals below 1, 2 from 1 up."""
+    return f"{gap:.3f}" if gap < 1.0 else f"{gap:.2f}"
 
 
 def _pref_autoload():
@@ -258,6 +274,13 @@ class SplitMixin:
         # None. While a piece with this uid exists (untouched), Space makes
         # no hull for it.
         self._split_remainder_uid = None
+        # Split CUT: what the mouse hovers on a source face (see
+        # _split_update_snap): dict kind 'FACE' / 'EDGE' / 'VERTEX', 'face'
+        # (world points), 'edge' (a, b) or None, 'vertex' or None, 'origin'
+        # and, for an edge, 'normal' of the plane; None when nothing is hovered.
+        self._split_snap = None
+        # Base plane (origin, normal; no offset) stored when F froze it.
+        self._split_frozen_plane = None
         self._split_preview_reset()
 
     def _split_preview_reset(self):
@@ -280,6 +303,8 @@ class SplitMixin:
         self._split_source_cache = None
         self._split_regions = {}
         self._split_remainder_uid = None
+        self._split_snap = None
+        self._split_frozen_plane = None
         self._split_unhide_picked()
         try:
             window = bpy.context.window
@@ -340,6 +365,9 @@ class SplitMixin:
             state = 'CUT'
         if state != 'PICK':
             self._split_fresh = set()
+        if not self.split_frozen:
+            # Re-chosen on the next hover (or by _split_follow_mouse).
+            self._split_snap = None
         self.split_state = state
         self._split_preview_reset()
         self._split_update_cursor(context)
@@ -358,10 +386,15 @@ class SplitMixin:
             lambda: _AXIS_NAMES[self.split_axis] + (" (frozen)" if self.split_frozen else ""),
             visible_getter=visible_split))
         hud.add_param(HUDParam(
+            "Snap",
+            lambda: (_SNAP_NAMES.get(self._split_snap['kind'], "-")
+                     if getattr(self, '_split_snap', None) else "-"),
+            visible_getter=lambda: visible_split() and not self._split_picking()))
+        hud.add_param(HUDParam(
             "Offset", lambda: self.split_offset, kind="float", fmt="{:.4f}",
             visible_getter=visible_split))
         hud.add_param(HUDParam(
-            "Merge gap", lambda: self.split_merge_gap, kind="float", fmt="{:.3f}",
+            "Merge gap", lambda: _gap_label(self.split_merge_gap),
             visible_getter=visible_islands))
         hud.add_param(HUDParam(
             "Merge void %", lambda: int(round(self.split_merge_cost * 100)), kind="int",
@@ -382,16 +415,143 @@ class SplitMixin:
         self._split_color_counter += 1
         return c
 
-    def _split_plane(self, context):
-        """(origin, normal) of the cutting plane from the 3D cursor."""
+    def _split_base_plane(self, context):
+        """(origin, normal) of the cutting plane before the offset.
+
+        An edge snap gives the plane through the edge containing the face
+        normal; otherwise the normal is the cursor axis chosen by
+        ``split_axis`` and the origin the cursor location (which follows
+        the snapped face hit / vertex, see _split_update_snap)."""
+        snap = getattr(self, '_split_snap', None)
+        if snap is not None and snap.get('normal') is not None:
+            return snap['origin'].copy(), snap['normal'].copy()
         mat = context.scene.cursor.matrix
         col = _AXIS_COLUMN[self.split_axis]
         normal = Vector(mat.col[col][:3])
         if normal.length_squared < 1e-20:
             return None
         normal.normalize()
-        origin = Vector(mat.col[3][:3]) + normal * self.split_offset
-        return origin, normal
+        return Vector(mat.col[3][:3]), normal
+
+    def _split_plane(self, context):
+        """(origin, normal) of the cutting plane: the frozen plane while F
+        holds it, else the live (snapped) one; shifted by the offset."""
+        base = None
+        if self.split_frozen:
+            base = getattr(self, '_split_frozen_plane', None)
+        if base is None:
+            base = self._split_base_plane(context)
+        if base is None:
+            return None
+        origin, normal = base
+        return origin + normal * self.split_offset, normal.copy()
+
+    def _split_track_mouse(self, context, event):
+        """Split CUT, plane not frozen: put the 3D cursor on the hovered face,
+        drop the host's edge highlight and update the snap target."""
+        try:
+            result = place_cursor_with_raycast_and_edge(
+                context, event, True, 0, preview=False, use_depsgraph=self.use_depsgraph)
+        except Exception as e:
+            print(f"Split: could not place the cursor: {e}")
+            result = None
+        try:
+            clear_edge_highlight()
+        except Exception as e:
+            print(f"Split: could not clear the edge highlight: {e}")
+        try:
+            self._split_update_snap(context, event, result)
+        except Exception as e:
+            print(f"Split: snap failed: {e}")
+            self._split_snap = None
+
+    def _split_update_snap(self, context, event, result):
+        """Choose the snap target (vertex / edge / face of the hovered source
+        face, by screen distance) and move the cursor to the plane origin."""
+        self._split_snap = None
+        face_data = result.get('face_data') if result else None
+        if not face_data or not face_data.get('edges'):
+            return
+        obj = face_data.get('object')
+        sources = self.original_selected_objects or ()
+        if obj is None or not any(obj == o for o in sources):
+            return
+        region = context.region
+        rv3d = context.region_data
+        if region is None or rv3d is None:
+            return
+        edges = face_data['edges']
+        verts = [Vector(e['start']) for e in edges]
+        n = len(verts)
+        if n < 3:
+            return
+        hit = Vector(face_data.get('hit_location', face_data.get('face_center')))
+        mouse = (event.mouse_region_x, event.mouse_region_y)
+        verts_2d = []
+        for v in verts:
+            p = view3d_utils.location_3d_to_region_2d(region, rv3d, v)
+            verts_2d.append(None if p is None else (p.x, p.y))
+        edges_2d = [(verts_2d[i], verts_2d[(i + 1) % n]) for i in range(n)]
+        choice = hs.pick_snap(mouse, verts_2d, edges_2d, _SNAP_VERT_PX, _SNAP_EDGE_PX)
+        face_pts = [tuple(v) for v in verts]
+        snap = {'kind': 'FACE', 'face': face_pts, 'edge': None, 'vertex': None,
+                'origin': hit, 'normal': None}
+        if choice[0] == 'VERTEX':
+            v = verts[choice[1]]
+            snap.update(kind='VERTEX', vertex=tuple(v), origin=v.copy())
+        elif choice[0] == 'EDGE':
+            edge_snap = self._split_edge_plane(region, rv3d, mouse, verts, choice)
+            if edge_snap is not None:
+                point, normal, a, b = edge_snap
+                snap.update(kind='EDGE', edge=(tuple(a), tuple(b)), origin=point,
+                            normal=normal)
+        self._split_snap = snap
+        if snap['kind'] != 'FACE':
+            # The cursor shows the plane origin; its rotation stays.
+            context.scene.cursor.location = snap['origin']
+
+    @staticmethod
+    def _split_edge_plane(region, rv3d, mouse, verts, choice):
+        """``(point, normal, a, b)`` of an edge snap: the point of edge
+        ``choice[1]`` under the mouse and the plane normal containing the
+        edge and the face normal, pointing away from the face centre; None
+        when degenerate."""
+        _kind, i, t2d = choice
+        n = len(verts)
+        a, b = verts[i], verts[(i + 1) % n]
+        # Face normal (Newell) from the world vertices.
+        fn = Vector((0.0, 0.0, 0.0))
+        for k in range(n):
+            p, q = verts[k], verts[(k + 1) % n]
+            fn.x += (p.y - q.y) * (p.z + q.z)
+            fn.y += (p.z - q.z) * (p.x + q.x)
+            fn.z += (p.x - q.x) * (p.y + q.y)
+        d = b - a
+        normal = d.cross(fn)
+        if fn.length_squared < 1e-30 or d.length_squared < 1e-30 \
+                or normal.length_squared < 1e-30 * d.length_squared * fn.length_squared:
+            return None
+        normal.normalize()
+        # The 3D point under the mouse: closest point between the view ray
+        # and the edge line (2D parameter as fallback), clamped to the edge.
+        t = t2d
+        try:
+            origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, mouse)
+            direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse)
+            hits = geometry.intersect_line_line(origin, origin + direction, a, b)
+            if hits is not None:
+                t = (hits[1] - a).dot(d) / d.length_squared
+        except Exception:
+            pass
+        t = min(1.0, max(0.0, t))
+        point = a + d * t
+        center = Vector((0.0, 0.0, 0.0))
+        for v in verts:
+            center += v
+        center /= n
+        if normal.dot(center - point) > 0.0:
+            normal = -normal
+        return point, normal, a, b
 
     def _split_pick(self, context, pieces=None, mouse=None):
         """Index into *pieces* (default: all pieces) of the piece under the
@@ -487,9 +647,15 @@ class SplitMixin:
             self._split_update_preview(context)
             plane = self._split_plane(context)
             preview = None if self._split_preview_dirty else self._split_preview_pieces
-        update_split_overlay(overlay_geometry(
+        data = overlay_geometry(
             self.split_pieces, self.split_active, self._split_hover, plane, preview,
-            pick=picking, fresh=self._split_fresh if picking else ()))
+            pick=picking, fresh=self._split_fresh if picking else ())
+        snap = self._split_snap
+        if snap is not None and not self._split_islands() and not picking:
+            # Hover feedback for draw_split_overlay (Split CUT only).
+            data['snap'] = {'kind': snap['kind'], 'face': snap['face'],
+                            'edge': snap['edge'], 'vertex': snap['vertex']}
+        update_split_overlay(data)
         if context.area is not None:
             context.area.tag_redraw()
 
@@ -548,6 +714,8 @@ class SplitMixin:
         self._split_source_cache = None
         self._split_regions = {}
         self._split_remainder_uid = None
+        self._split_snap = None
+        self._split_frozen_plane = None
         self._split_pristine = True
         if self._split_timer is None:
             try:
@@ -558,6 +726,7 @@ class SplitMixin:
                 self._split_timer = None
         hide_hull_preview()
         clear_preview_faces()
+        clear_edge_highlight()
         enable_split_overlay()
         self._split_update_cursor(context)
         loaded = 0
@@ -677,11 +846,7 @@ class SplitMixin:
         plane is frozen (entering CUT, so the plane does not lag one move)."""
         if self.split_frozen or event is None:
             return
-        try:
-            place_cursor_with_raycast_and_edge(
-                context, event, True, 0, preview=False, use_depsgraph=self.use_depsgraph)
-        except Exception as e:
-            print(f"Split: could not place the cursor: {e}")
+        self._split_track_mouse(context, event)
 
     def _split_pick_state_click(self, context, event, merge):
         """LMB / RMB in Split mode's PICK state: a piece under the mouse
@@ -873,8 +1038,10 @@ class SplitMixin:
             label = "Ignore thinner: " + ("off" if v <= 0.0 else f"{v:.3f}")
         elif event.ctrl:
             v = self.split_merge_gap * (_PARAM_FACTOR if up else 1.0 / _PARAM_FACTOR)
-            self.split_merge_gap = min(_GAP_RANGE[1], max(_GAP_RANGE[0], v))
-            label = f"Merge gap: {self.split_merge_gap:.3f}"
+            v = max(_GAP_MIN, v)
+            if math.isfinite(v):
+                self.split_merge_gap = v
+            label = f"Merge gap: {_gap_label(self.split_merge_gap)}"
         else:
             v = round(self.split_merge_cost + (0.05 if up else -0.05), 2)
             self.split_merge_cost = min(_COST_RANGE[1], max(_COST_RANGE[0], v))
@@ -1404,9 +1571,7 @@ class SplitMixin:
                     if hover_changed:
                         self._split_refresh(context)
                 elif not self.split_frozen:
-                    place_cursor_with_raycast_and_edge(
-                        context, event, True, 0, preview=False,
-                        use_depsgraph=self.use_depsgraph)
+                    self._split_track_mouse(context, event)
                     self._split_refresh(context)
                 elif hover_changed:
                     self._split_refresh(context)
@@ -1546,12 +1711,19 @@ class SplitMixin:
 
         if etype == 'R':
             self.split_axis = (self.split_axis + 1) % 3
+            snap = self._split_snap
+            if self.split_frozen and (snap is None or snap.get('normal') is None):
+                # The cursor has not moved since freezing: R still turns the
+                # frozen face / vertex plane (an edge plane ignores R).
+                self._split_frozen_plane = self._split_base_plane(context)
             self.report({'INFO'}, f"Split plane: {_AXIS_NAMES[self.split_axis]}")
             self._split_refresh(context)
             return True
 
         if etype == 'F':
             self.split_frozen = not self.split_frozen
+            self._split_frozen_plane = (
+                self._split_base_plane(context) if self.split_frozen else None)
             self.report({'INFO'}, "Split plane frozen" if self.split_frozen
                         else "Split plane follows the mouse")
             self._split_refresh(context)

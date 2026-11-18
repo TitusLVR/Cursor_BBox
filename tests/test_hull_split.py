@@ -491,5 +491,55 @@ class ClipOutsideConvexTests(unittest.TestCase):
         self.assertIs(out[1], b)
 
 
+# A 100 px square face on screen.
+_SNAP_VERTS = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+_SNAP_EDGES = [(_SNAP_VERTS[i], _SNAP_VERTS[(i + 1) % 4]) for i in range(4)]
+
+
+class PickSnapTests(unittest.TestCase):
+    VERTS = _SNAP_VERTS
+    EDGES = _SNAP_EDGES
+
+    def test_vertex_wins_over_edge(self):
+        # 5 px from vertex 1 and 3 px from edge 0: still the vertex.
+        self.assertEqual(hs.pick_snap((96.0, 3.0), self.VERTS, self.EDGES, 12, 10),
+                         ('VERTEX', 1))
+
+    def test_edge_only(self):
+        kind, i, t = hs.pick_snap((50.0, 6.0), self.VERTS, self.EDGES, 12, 10)
+        self.assertEqual((kind, i), ('EDGE', 0))
+        self.assertAlmostEqual(t, 0.5)
+
+    def test_edge_parameter_is_clamped(self):
+        # Beyond the end of edge 0 but within reach of its end point only
+        # through the clamp (vertex threshold 0 disables vertices).
+        kind, i, t = hs.pick_snap((104.0, -3.0), self.VERTS, self.EDGES, 0, 10)
+        self.assertEqual(kind, 'EDGE')
+        self.assertAlmostEqual(t, 1.0 if i == 0 else 0.0)
+
+    def test_neither(self):
+        self.assertEqual(hs.pick_snap((50.0, 50.0), self.VERTS, self.EDGES, 12, 10),
+                         ('FACE',))
+
+    def test_none_entries_are_skipped(self):
+        verts = [None, (100.0, 0.0), None, None]
+        edges = [None, ((100.0, 0.0), None), None, ((0.0, 100.0), (0.0, 0.0))]
+        kind, i, t = hs.pick_snap((2.0, 2.0), verts, edges, 12, 10)
+        self.assertEqual((kind, i), ('EDGE', 3))
+        self.assertAlmostEqual(t, 0.98)
+        self.assertEqual(hs.pick_snap((99.0, 1.0), verts, edges, 12, 10), ('VERTEX', 1))
+
+    def test_degenerate_edge(self):
+        edges = [((10.0, 10.0), (10.0, 10.0))]
+        kind, i, t = hs.pick_snap((13.0, 14.0), [], edges, 12, 10)
+        self.assertEqual((kind, i, t), ('EDGE', 0, 0.0))
+        self.assertEqual(hs.pick_snap((30.0, 30.0), [], edges, 12, 10), ('FACE',))
+
+    def test_closest_on_segment(self):
+        t, d = hs.closest_on_segment_2d((5.0, 5.0), (0.0, 0.0), (10.0, 0.0))
+        self.assertAlmostEqual(t, 0.5)
+        self.assertAlmostEqual(d, 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

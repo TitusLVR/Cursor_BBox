@@ -582,6 +582,45 @@ def _split_color_batch(gpu_manager, shader, key, kind, verts, sig, make_colors):
     return batch
 
 
+# Split CUT hover feedback (see _draw_split_snap).
+_SNAP_ACCENT = (1.0, 0.82, 0.30)      # warm yellow
+_SNAP_FACE_FILL = (1.0, 1.0, 1.0, 0.10)
+_SNAP_FACE_LINE = (1.0, 1.0, 1.0, 0.45)
+_SNAP_FACE_LINE_FAINT = (1.0, 1.0, 1.0, 0.25)
+
+
+def _draw_split_snap(shader, snap):
+    """Hover feedback of Split CUT: the face (tint + outline), the snapped
+    edge or the snapped vertex (accent colour, faint face outline). Caller
+    sets blend / depth and restores line width and point size."""
+    face = [tuple(p) for p in (snap.get('face') or ())]
+    kind = snap.get('kind')
+    outline = []
+    for i in range(len(face)):
+        outline.append(face[i])
+        outline.append(face[(i + 1) % len(face)])
+    shader.bind()
+    if kind == 'FACE' and len(face) >= 3:
+        tris = []
+        for i in range(1, len(face) - 1):
+            tris.extend((face[0], face[i], face[i + 1]))
+        shader.uniform_float("color", _SNAP_FACE_FILL)
+        batch_for_shader(shader, 'TRIS', {"pos": tris}).draw(shader)
+    if outline:
+        gpu.state.line_width_set(1.5 if kind == 'FACE' else 1.0)
+        shader.uniform_float("color", _SNAP_FACE_LINE if kind == 'FACE' else _SNAP_FACE_LINE_FAINT)
+        batch_for_shader(shader, 'LINES', {"pos": outline}).draw(shader)
+    if kind == 'EDGE' and snap.get('edge'):
+        a, b = snap['edge']
+        gpu.state.line_width_set(2.0)
+        shader.uniform_float("color", (*_SNAP_ACCENT, 0.95))
+        batch_for_shader(shader, 'LINES', {"pos": [tuple(a), tuple(b)]}).draw(shader)
+    elif kind == 'VERTEX' and snap.get('vertex') is not None:
+        gpu.state.point_size_set(8.0)
+        shader.uniform_float("color", (*_SNAP_ACCENT, 0.95))
+        batch_for_shader(shader, 'POINTS', {"pos": [tuple(snap['vertex'])]}).draw(shader)
+
+
 def draw_split_overlay(gpu_manager, split_overlay):
     """Draw split-mode pieces and the cutting plane (POST_VIEW).
 
@@ -591,6 +630,8 @@ def draw_split_overlay(gpu_manager, split_overlay):
     so pieces stay visible through the source mesh; their alpha fades with
     how each triangle faces the viewer. Edges whose two faces both face away
     are dimmed by ``backface_edges``, back-face fills by ``backface_faces``.
+    An optional ``'snap'`` (Split CUT hover target: ``kind``, ``face``,
+    ``edge``, ``vertex``) is drawn last, on top, without depth test.
     """
     if not split_overlay:
         return
@@ -668,7 +709,13 @@ def draw_split_overlay(gpu_manager, split_overlay):
             shader.bind()
             shader.uniform_float("color", (0.55, 0.8, 1.0, 0.35))
             batch_for_shader(shader, 'LINES', {"pos": plane['border']}).draw(shader)
+
+        snap = split_overlay.get('snap')
+        if snap:
+            gpu.state.depth_test_set('NONE')
+            _draw_split_snap(shader, snap)
     finally:
+        gpu.state.point_size_set(1.0)
         gpu.state.line_width_set(prev_width)
         gpu.state.depth_mask_set(prev_mask)
         gpu.state.depth_test_set(prev_depth)

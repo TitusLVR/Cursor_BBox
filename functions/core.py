@@ -759,6 +759,12 @@ def update_edge_highlight(edge_vertices):
     global _state
     _state.current_edge_data = {'vertices': edge_vertices}
 
+def clear_edge_highlight():
+    """Drop the highlighted edge (the handler stays; the next hover sets a
+    new one)."""
+    global _state
+    _state.current_edge_data = None
+
 def update_bbox_preview(target_obj, push_value, cursor_location, cursor_rotation):
     """Optimized bbox preview update"""
     global _state

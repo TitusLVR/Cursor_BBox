@@ -196,6 +196,51 @@ def clip_outside_convex(polys: Sequence[Polygon], planes, eps: float) -> tuple[P
     return tuple(out)
 
 
+def closest_on_segment_2d(p, a, b) -> tuple[float, float]:
+    """``(t, distance)`` of the point of segment *a*-*b* closest to *p*
+    (2D); *t* in [0, 1] along the segment, 0 for a zero-length segment."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    length2 = dx * dx + dy * dy
+    if length2 <= 1e-24:
+        t = 0.0
+    else:
+        t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length2
+        t = min(1.0, max(0.0, t))
+    cx, cy = a[0] + dx * t, a[1] + dy * t
+    return t, math.hypot(p[0] - cx, p[1] - cy)
+
+
+def pick_snap(mouse, verts_2d, edges_2d, vert_px: float, edge_px: float):
+    """Snap target of the mouse among a face's projected elements.
+
+    *verts_2d* is a list of 2D points (None for one that does not
+    project), *edges_2d* a list of ``(a, b)`` 2D pairs (None, or a None end,
+    to skip). Returns ``('VERTEX', i)`` for the nearest vertex within
+    *vert_px*, else ``('EDGE', i, t)`` for the nearest edge within *edge_px*
+    (*t* the clamped 2D parameter along it), else ``('FACE',)``. A vertex in
+    range wins over any edge.
+    """
+    best_v = None
+    for i, v in enumerate(verts_2d):
+        if v is None:
+            continue
+        d = math.hypot(mouse[0] - v[0], mouse[1] - v[1])
+        if d <= vert_px and (best_v is None or d < best_v[1]):
+            best_v = (i, d)
+    if best_v is not None:
+        return ('VERTEX', best_v[0])
+    best_e = None
+    for i, e in enumerate(edges_2d):
+        if e is None or e[0] is None or e[1] is None:
+            continue
+        t, d = closest_on_segment_2d(mouse, e[0], e[1])
+        if d <= edge_px and (best_e is None or d < best_e[2]):
+            best_e = (i, t, d)
+    if best_e is not None:
+        return ('EDGE', best_e[0], best_e[1])
+    return ('FACE',)
+
+
 def unique_points(polys: Sequence[Polygon], digits: int = 6) -> list[Vec3]:
     """Deduplicated points of *polys* (rounded to *digits* for the comparison).
 
