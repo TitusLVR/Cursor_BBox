@@ -30,7 +30,7 @@ turns it into a piece: the source polygons clipped to that object's convex
 hull (or its own polygons when no source geometry lies inside), so the work
 continues where it stopped. ``Shift+Q`` (and, with the
 ``split_autoload_existing`` preference, entering the mode) does the same for
-every existing collision of the selection in the collision collection; ``H``
+every existing collision of the selection in the collision collection; ``W``
 adds the hull of the whole selection as another piece. A picked object is
 hidden while editing. On Space it is kept when its piece is unchanged (no
 hull is made for that piece) and deleted otherwise (replaced by the new
@@ -73,6 +73,7 @@ from ..functions import hull_split as hs
 from ..functions.split import (
     make_piece,
     hull_planes,
+    hull_volume,
     collect_source_polys,
     cut_piece,
     pick_piece,
@@ -100,7 +101,7 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Delete active piece", "X"),
     HUDItem("Edit existing collision under cursor", "Q"),
     HUDItem("Load existing collisions", "Shift+Q"),
-    HUDItem("Add hull of whole selection", "H"),
+    HUDItem("Add hull of whole selection", "W"),
     HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
     HUDItem("Create hulls", "SPACE"),
 ]
@@ -115,7 +116,7 @@ ISLANDS_HELP_ITEMS = [
     HUDItem("Delete active piece", "X"),
     HUDItem("Edit existing collision under cursor", "Q"),
     HUDItem("Load existing collisions", "Shift+Q"),
-    HUDItem("Add hull of whole selection", "H"),
+    HUDItem("Add hull of whole selection", "W"),
     HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
     HUDItem("Split mode (keep pieces)", "K"),
     HUDItem("Create hulls", "SPACE"),
@@ -151,6 +152,12 @@ _PARAM_FACTOR = 1.25
 # Existing collisions are loaded when their bbox touches the source bbox
 # expanded by this fraction of its diagonal.
 _LOAD_BBOX_MARGIN = 0.02
+# An existing collision belongs to the selection when the source geometry
+# inside it has at least this fraction of its own hull volume.
+_OWNED_MIN_RATIO = 0.25
+# The uncovered remainder is added only when its hull has at least this
+# fraction of the whole-selection hull volume.
+_REMAINDER_MIN_RATIO = 0.01
 
 
 def _pref_autoload():
@@ -178,6 +185,17 @@ def _collision_collection(context):
     if not name:
         return None
     return bpy.data.collections.get(name)
+
+
+def _loaded_message(loaded, rejected, coll, remainder):
+    """INFO text after a load of *loaded* existing collisions."""
+    msg = f"Loaded {loaded} existing collision(s)"
+    if remainder:
+        msg += " + uncovered remainder"
+    if rejected:
+        where = coll.name if coll is not None else "the collision collection"
+        msg += f" ({rejected} others in {where} do not belong to the selection)"
+    return msg
 
 
 def _world_bbox(obj):
@@ -233,6 +251,13 @@ class SplitMixin:
         # True while the piece list is the untouched initial piece (a Q pick
         # then replaces it instead of being appended).
         self._split_pristine = False
+        # {picked object name: its convex region (see _split_object_region)
+        # or None}, for the uncovered remainder.
+        self._split_regions = {}
+        # uid of the uncovered-remainder piece added by the last load, or
+        # None. While a piece with this uid exists (untouched), Space makes
+        # no hull for it.
+        self._split_remainder_uid = None
         self._split_preview_reset()
 
     def _split_preview_reset(self):
@@ -253,6 +278,8 @@ class SplitMixin:
         self._split_hover = None
         self._split_pristine = False
         self._split_source_cache = None
+        self._split_regions = {}
+        self._split_remainder_uid = None
         self._split_unhide_picked()
         try:
             window = bpy.context.window
@@ -519,6 +546,8 @@ class SplitMixin:
         self._split_end_auto()
         self._split_undo.clear()
         self._split_source_cache = None
+        self._split_regions = {}
+        self._split_remainder_uid = None
         self._split_pristine = True
         if self._split_timer is None:
             try:
@@ -534,14 +563,14 @@ class SplitMixin:
         loaded = 0
         if _pref_autoload():
             try:
-                loaded, _skipped, _coll = self._split_load_existing(context)
+                loaded, rejected, coll, remainder = self._split_load_existing(context)
             except Exception as e:
                 print(f"Split: loading existing collisions failed: {e}")
                 loaded = 0
         if loaded:
             # Continuing existing work: no explode / auto-merge in Islands.
             self._split_undo.clear()
-            self.report({'INFO'}, f"Loaded {loaded} existing collision(s)")
+            self.report({'INFO'}, _loaded_message(loaded, rejected, coll, remainder))
         elif kind == 'ISLANDS':
             self._split_hover = self._split_pick(context)
             self._split_explode(context, single_msg="Single island: nothing to merge")
@@ -975,27 +1004,103 @@ class SplitMixin:
                 polys.append(tuple(points[i] for i in verts))
         return points, tuple(polys)
 
-    def _split_piece_from_object(self, context, obj):
-        """A Piece of the source geometry inside *obj*'s convex hull, else of
-        *obj*'s own polygons; None when neither encloses a volume."""
+    def _split_object_region(self, context, obj):
+        """``(points, own_polys, region)`` of *obj* in world space. *region*
+        is its convex hull as a dict ``planes`` (outward, pushed OUT by
+        ``tol``), ``tol``, ``eps``, ``lo`` / ``hi`` (bbox grown by tol), or
+        None when the object has no solid hull."""
         points, own_polys = self._split_object_geometry(context, obj)
+        box = hs.bbox(points)
+        if box is None:
+            return points, own_polys, None
+        ext = hs.extent((points,))
+        tol = max(1e-4 * ext, 1e-9)
+        planes = hull_planes(points, tol)
+        if not planes:
+            return points, own_polys, None
+        region = {
+            'planes': planes,
+            'tol': tol,
+            'eps': max(1e-6 * ext, 1e-9),
+            'lo': tuple(c - tol for c in box[0]),
+            'hi': tuple(c + tol for c in box[1]),
+        }
+        return points, own_polys, region
+
+    def _split_inside_polys(self, context, region):
+        """The source polygons clipped to *region* (bbox-prefiltered)."""
+        lo, hi = region['lo'], region['hi']
+        candidates = [poly for poly, plo, phi in self._split_source_cached(context)
+                      if all(plo[k] <= hi[k] and phi[k] >= lo[k] for k in range(3))]
+        return hs.clip_to_convex(candidates, region['planes'], region['eps'])
+
+    def _split_piece_from_object(self, context, obj):
+        """Q: ``(piece, region)``: a Piece of the source geometry inside
+        *obj*'s convex hull, else of *obj*'s own polygons; piece None when
+        neither encloses a volume."""
+        _points, own_polys, region = self._split_object_region(context, obj)
         color = self._split_color_counter
         piece = None
-        box = hs.bbox(points)
-        if box is not None:
-            tol = max(1e-4 * hs.extent((points,)), 1e-9)
-            planes = hull_planes(points, tol)
-            if planes:
-                lo = tuple(c - tol for c in box[0])
-                hi = tuple(c + tol for c in box[1])
-                candidates = [poly for poly, plo, phi in self._split_source_cached(context)
-                              if all(plo[k] <= hi[k] and phi[k] >= lo[k] for k in range(3))]
-                eps = max(1e-6 * hs.extent((points,)), 1e-9)
-                clipped = hs.clip_to_convex(candidates, planes, eps)
-                if clipped:
-                    piece = make_piece(clipped, color)
+        if region is not None:
+            clipped = self._split_inside_polys(context, region)
+            if clipped:
+                piece = make_piece(clipped, color)
         if piece is None and own_polys:
             piece = make_piece(own_polys, color)
+        return piece, region
+
+    def _split_owned_piece(self, context, obj):
+        """Loader: ``(piece, region)`` when *obj* belongs to the selection —
+        the source geometry clipped inside it is solid and its hull volume is
+        at least ``_OWNED_MIN_RATIO`` of *obj*'s own hull volume — else
+        ``(None, None)``. No fallback to the object's own polygons."""
+        points, _own_polys, region = self._split_object_region(context, obj)
+        if region is None:
+            return None, None
+        clipped = self._split_inside_polys(context, region)
+        if not clipped:
+            return None, None
+        piece = make_piece(clipped, self._split_color_counter)
+        if piece is None:
+            return None, None
+        own_volume = hull_volume(points)
+        if not own_volume > 0.0 or piece.volume < _OWNED_MIN_RATIO * own_volume:
+            return None, None
+        return piece, region
+
+    def _split_remainder_piece(self, context):
+        """The source geometry OUTSIDE every picked object's convex region,
+        as a new Piece, or None when it is not solid or under
+        ``_REMAINDER_MIN_RATIO`` of the whole-selection hull volume (the
+        selection counts as covered). Uses the same outward-pushed planes as
+        the inside clip, so inside and remainder split the source along one
+        surface."""
+        regions = [r for r in self._split_regions.values() if r is not None]
+        if not regions:
+            return None
+        polys = [poly for poly, _lo, _hi in self._split_source_cached(context)]
+        if not polys:
+            return None
+        whole_volume = hull_volume(hs.unique_points(polys))
+        for region in regions:
+            lo, hi = region['lo'], region['hi']
+            out = []
+            for poly in polys:
+                box = hs.bbox(poly)
+                if box is not None and all(box[0][k] <= hi[k] and box[1][k] >= lo[k]
+                                           for k in range(3)):
+                    out.extend(hs.clip_outside_convex((poly,), region['planes'], region['eps']))
+                else:
+                    out.append(poly)
+            polys = out
+            if not polys:
+                return None
+        piece = make_piece(polys, self._split_color_counter)
+        if piece is None:
+            return None
+        if not whole_volume > 0.0 or piece.volume < _REMAINDER_MIN_RATIO * whole_volume:
+            return None
+        self._split_next_color()
         return piece
 
     def _split_edit_existing(self, context, event):
@@ -1012,15 +1117,15 @@ class SplitMixin:
             return
         name = obj.name
         try:
-            piece = self._split_piece_from_object(context, obj)
+            piece, region = self._split_piece_from_object(context, obj)
         except Exception as e:
             print(f"Split: could not build a piece from {name!r}: {e}")
-            piece = None
+            piece, region = None, None
         if piece is None:
             self.report({'WARNING'}, f"Cannot edit {name}: it has no volume")
             return
         self._split_next_color()
-        self._split_adopt(context, [(obj, piece)])
+        self._split_adopt(context, [(obj, piece, region)])
         if not self._split_islands():
             self._split_set_state(context, 'CUT')
             self._split_follow_mouse(context, event)
@@ -1028,14 +1133,15 @@ class SplitMixin:
 
     def _split_adopt(self, context, entries):
         """Add the pieces of picked existing objects: *entries* is a list of
-        ``(obj, piece)``. Not undoable (clears the mode's undo stack). The
-        untouched initial piece is replaced, otherwise they are appended; the
-        first one becomes active. Each object is hidden and recorded."""
+        ``(obj, piece, region)``. Not undoable (clears the mode's undo
+        stack). The untouched initial piece is replaced, otherwise they are
+        appended; the first one becomes active. Each object is hidden and
+        recorded (with its region, for the uncovered remainder)."""
         if not entries:
             return
         self._split_end_auto()
         self._split_undo.clear()
-        new_pieces = [piece for _obj, piece in entries]
+        new_pieces = [piece for _obj, piece, _region in entries]
         if self._split_pristine and len(self.split_pieces) == 1:
             first = 0
             self.split_pieces = list(new_pieces)
@@ -1045,13 +1151,14 @@ class SplitMixin:
         self._split_pristine = False
         self._split_fresh = set()
         self._split_set_active(first)
-        for obj, piece in entries:
+        for obj, piece, region in entries:
             name = obj.name
             try:
                 obj.hide_set(True)
             except Exception as e:
                 print(f"Split: could not hide {name!r}: {e}")
             self._split_picked[name] = piece.uid
+            self._split_regions[name] = region
         self._split_after_change(context)
 
     def _split_existing_candidates(self, context):
@@ -1100,48 +1207,74 @@ class SplitMixin:
     def _split_load_existing(self, context):
         """Turn every existing collision object of the selection (see
         ``_split_existing_candidates``) into a piece, like Q does for one.
-        One undo-stack clear for the batch. Returns ``(loaded, skipped,
-        collection)``; *skipped* objects could not form a piece."""
+        Only candidates that own enough of the selection's geometry are
+        loaded (``_split_owned_piece``); the others are left alone (not
+        hidden, not listed). After at least one load, the source geometry
+        outside every picked region is added as an uncovered-remainder piece
+        (replacing an untouched remainder of an earlier load). One
+        undo-stack clear for the batch. Returns ``(loaded, rejected,
+        collection, remainder_added)``."""
         objs, coll = self._split_existing_candidates(context)
         entries = []
-        skipped = 0
+        rejected = 0
         for obj in objs:
             try:
-                piece = self._split_piece_from_object(context, obj)
+                piece, region = self._split_owned_piece(context, obj)
             except Exception as e:
                 print(f"Split: could not build a piece from {obj.name!r}: {e}")
-                piece = None
+                piece, region = None, None
             if piece is None:
-                skipped += 1
+                rejected += 1
                 continue
             self._split_next_color()
-            entries.append((obj, piece))
+            entries.append((obj, piece, region))
         if not entries:
-            return 0, skipped, coll
+            return 0, rejected, coll, False
+        # An untouched remainder of an earlier load is derived data: drop it,
+        # a new one is computed against every picked region below.
+        old = self._split_remainder_uid
+        self._split_remainder_uid = None
+        if old is not None:
+            self.split_pieces = [p for p in self.split_pieces if p.uid != old]
+            self.split_active = min(self.split_active, max(0, len(self.split_pieces) - 1))
         self._split_adopt(context, entries)
+        try:
+            remainder = self._split_remainder_piece(context)
+        except Exception as e:
+            print(f"Split: could not build the uncovered remainder: {e}")
+            remainder = None
+        if remainder is not None:
+            self.split_pieces.append(remainder)
+            self._split_remainder_uid = remainder.uid
         if not self._split_islands():
-            if len(entries) >= 2:
+            if remainder is not None:
+                # Most likely next step: work on what is not covered yet.
+                self._split_set_active(len(self.split_pieces) - 1)
+                self._split_set_state(context, 'CUT')
+            elif len(entries) >= 2:
                 self._split_set_state(context, 'PICK')
-                self._split_fresh = {piece.uid for _obj, piece in entries}
+                self._split_fresh = {piece.uid for _obj, piece, _r in entries}
             else:
                 self._split_set_state(context, 'CUT')
-        return len(entries), skipped, coll
+        self._split_after_change(context)
+        return len(entries), rejected, coll, remainder is not None
 
     def _split_load_existing_key(self, context):
         """Shift+Q: load the existing collisions of the selection now."""
         try:
-            loaded, skipped, coll = self._split_load_existing(context)
+            loaded, rejected, coll, remainder = self._split_load_existing(context)
         except Exception as e:
             print(f"Split: loading existing collisions failed: {e}")
             self.report({'WARNING'}, "Could not load the existing collisions")
             return
-        extra = f" ({skipped} without volume skipped)" if skipped else ""
+        where = coll.name if coll is not None else "the collision collection"
         if loaded:
-            self.report({'INFO'}, f"Loaded {loaded} existing collision(s){extra}")
+            self.report({'INFO'}, _loaded_message(loaded, rejected, coll, remainder))
+        elif rejected:
+            self.report({'WARNING'}, f"No existing collisions belong to the selection in "
+                                     f"{where} ({rejected} others ignored)")
         else:
-            where = coll.name if coll is not None else "the collision collection"
-            self.report({'WARNING'},
-                        f"No existing collisions for the selection in {where}{extra}")
+            self.report({'WARNING'}, f"No existing collisions for the selection in {where}")
 
     def _split_whole_piece(self, context, color):
         """The hull piece of the whole selection (the marked faces, else
@@ -1155,7 +1288,7 @@ class SplitMixin:
         return make_piece(polys, color) if polys else None
 
     def _split_add_whole(self, context):
-        """H: append the hull of the whole selection as a new active piece
+        """W: append the hull of the whole selection as a new active piece
         (undoable)."""
         try:
             piece = self._split_whole_piece(context, self._split_color_counter)
@@ -1186,6 +1319,12 @@ class SplitMixin:
         for name, uid in self._split_picked.items():
             (kept if uid in piece_uids else replaced_names).append(name)
         kept_uids = {self._split_picked[name] for name in kept}
+        # An untouched uncovered remainder is "not covered yet", not a
+        # collision the user asked for: no hull for it.
+        remainder_skipped = (self._split_remainder_uid is not None
+                             and self._split_remainder_uid in piece_uids)
+        if remainder_skipped:
+            kept_uids.add(self._split_remainder_uid)
         to_create = [p for p in self.split_pieces if p.uid not in kept_uids]
         if not to_create and not replaced_names:
             self._split_exit(context, message="Nothing changed")
@@ -1210,6 +1349,8 @@ class SplitMixin:
             msg = f"Created {created} hulls, replaced {replaced}, kept {len(kept)} unchanged"
         else:
             msg = f"Created {created} hulls"
+        if remainder_skipped:
+            msg += "; untouched remainder skipped"
         if failed:
             self.report({'WARNING'}, f"{msg}, {failed} failed")
         else:
@@ -1310,7 +1451,7 @@ class SplitMixin:
 
         if not press:
             # Releases of keys we own are swallowed; others (HUD etc.) fall through.
-            return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L', 'TAB', 'Q', 'H'}
+            return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L', 'TAB', 'Q', 'W'}
                              | _CONFIRM_KEYS | _BLOCKED_KEYS | set(_SLAB_KEYS))
 
         if etype == 'Q':
@@ -1326,7 +1467,7 @@ class SplitMixin:
                 self._split_refresh(context)
             return True
 
-        if etype == 'H':
+        if etype == 'W':
             if not event.ctrl and not event.alt and not event.shift:
                 self._split_add_whole(context)
                 self._split_refresh(context)

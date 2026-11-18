@@ -433,5 +433,63 @@ class ClipToConvexTests(unittest.TestCase):
         self.assertIs(out[0], inner)
 
 
+def _area(poly):
+    """Area of a planar polygon (Newell normal length / 2)."""
+    ax = ay = az = 0.0
+    q = poly[-1]
+    for p in poly:
+        ax += (q[1] - p[1]) * (q[2] + p[2])
+        ay += (q[2] - p[2]) * (q[0] + p[0])
+        az += (q[0] - p[0]) * (q[1] + p[1])
+        q = p
+    return 0.5 * (ax * ax + ay * ay + az * az) ** 0.5
+
+
+class ClipOutsideConvexTests(unittest.TestCase):
+    CUBE = ClipToConvexTests.CUBE
+    _square = staticmethod(ClipToConvexTests._square)
+
+    def test_outside_square_is_returned_by_identity(self):
+        outside = self._square(2.0, 3.0, 0.25, 0.75, 0.5)
+        out = hs.clip_outside_convex([outside], self.CUBE, EPS)
+        self.assertEqual(len(out), 1)
+        self.assertIs(out[0], outside)
+
+    def test_inner_square_is_dropped(self):
+        inner = self._square(0.25, 0.75, 0.25, 0.75, 0.5)
+        self.assertEqual(hs.clip_outside_convex([inner], self.CUBE, EPS), ())
+
+    def test_square_crossing_a_face_keeps_only_its_outside_part(self):
+        crossing = self._square(0.5, 1.5, 0.25, 0.75, 0.5)
+        out = hs.clip_outside_convex([crossing], self.CUBE, EPS)
+        self.assertEqual(len(out), 1)
+        lo, hi = _bbox(out[0])
+        self.assertAlmostEqual(lo[0], 1.0)
+        self.assertAlmostEqual(hi[0], 1.5)
+        self.assertAlmostEqual(sum(_area(p) for p in out), 0.25)
+
+    def test_large_square_yields_the_ring_around_the_region(self):
+        # Spans [-1, 2]^2 at mid height: the cube's [0, 1]^2 cross-section is
+        # removed, a ring of area 9 - 1 = 8 remains.
+        big = self._square(-1.0, 2.0, -1.0, 2.0, 0.5)
+        out = hs.clip_outside_convex([big], self.CUBE, EPS)
+        self.assertGreaterEqual(len(out), 4)
+        self.assertAlmostEqual(sum(_area(p) for p in out), 8.0)
+        for poly in out:
+            lo, hi = _bbox(poly)
+            # No emitted part reaches into the open cube interior.
+            inside = (lo[0] > 0.0 and hi[0] < 1.0) and (lo[1] > 0.0 and hi[1] < 1.0)
+            self.assertFalse(inside)
+
+    def test_order_is_preserved(self):
+        a = self._square(2.0, 3.0, 0.25, 0.75, 0.5)
+        inner = self._square(0.25, 0.75, 0.25, 0.75, 0.5)
+        b = self._square(-3.0, -2.0, 0.25, 0.75, 0.5)
+        out = hs.clip_outside_convex([a, inner, b], iter(self.CUBE), EPS)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], a)
+        self.assertIs(out[1], b)
+
+
 if __name__ == "__main__":
     unittest.main()

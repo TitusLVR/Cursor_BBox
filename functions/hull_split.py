@@ -171,6 +171,31 @@ def clip_to_convex(polys: Sequence[Polygon], planes, eps: float) -> tuple[Polygo
     return tuple(out)
 
 
+def clip_outside_convex(polys: Sequence[Polygon], planes, eps: float) -> tuple[Polygon, ...]:
+    """The parts of *polys* OUTSIDE the convex region bounded by *planes*.
+
+    *planes* is an iterable of ``(point, outward_normal)``. Each polygon is
+    peeled plane by plane: the part in front of a plane is outside the
+    region and emitted, the part behind goes on to the next plane; what is
+    left behind every plane is inside and dropped. A polygon wholly in front
+    of the first plane it meets is emitted as the same object. One input
+    polygon can yield several output pieces (in plane order); input order is
+    preserved.
+    """
+    planes = tuple(planes)
+    out: list[Polygon] = []
+    for poly in polys:
+        remaining = poly
+        for co, no in planes:
+            front, back = clip_polygon(remaining, co, no, eps)
+            if front is not None:
+                out.append(front)
+            remaining = back
+            if remaining is None:
+                break
+    return tuple(out)
+
+
 def unique_points(polys: Sequence[Polygon], digits: int = 6) -> list[Vec3]:
     """Deduplicated points of *polys* (rounded to *digits* for the comparison).
 

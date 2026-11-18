@@ -4,7 +4,10 @@ A :class:`Piece` holds clipped copies of source polygons (world space, see
 ``hull_split``) plus its convex hull, ready for drawing and picking. The source
 meshes are never modified.
 """
+import math
+
 import bmesh
+import bpy
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
 from bpy_extras import view3d_utils
@@ -14,15 +17,17 @@ from .utils import get_evaluated_mesh
 
 
 # Fill colours for the pieces, indexed by ``color_index % len(SPLIT_PALETTE)``.
+# Muted at the user's request: each hue mixed 40% toward a grey of its own
+# luminance (pastel tones, not pure primaries).
 SPLIT_PALETTE = (
-    (1.00, 0.45, 0.20),  # orange
-    (0.25, 0.65, 1.00),  # blue
-    (0.40, 0.90, 0.30),  # green
-    (0.95, 0.30, 0.65),  # pink
-    (1.00, 0.85, 0.20),  # yellow
-    (0.60, 0.40, 1.00),  # violet
-    (0.20, 0.90, 0.85),  # cyan
-    (0.85, 0.20, 0.25),  # red
+    (0.82, 0.49, 0.34),  # orange
+    (0.39, 0.63, 0.84),  # blue
+    (0.54, 0.84, 0.48),  # green
+    (0.76, 0.37, 0.58),  # pink
+    (0.93, 0.84, 0.45),  # yellow
+    (0.55, 0.43, 0.79),  # violet
+    (0.42, 0.84, 0.81),  # cyan
+    (0.65, 0.26, 0.29),  # red
 )
 
 _uid_counter = [0]
@@ -79,12 +84,14 @@ def _points_eps(points):
     return max(1e-6 * diag, 1e-9)
 
 
-def _hull_data(points):
+def _hull_data(points, wire=True):
     """Convex hull of *points* (assumed solid) via bmesh.
 
     Returns ``(hull_verts, faces, tris, tri_normals, tri_centers, edges,
     edge_normals)`` or None when the hull has no faces. Raises on bmesh
-    failure.
+    failure. Everything comes from the raw hull except, with *wire*, the
+    edges / edge_normals (the drawn wireframe), which come from a planar
+    dissolve of it (see ``_clean_hull_edges``).
     """
     bm = bmesh.new()
     try:
@@ -155,9 +162,84 @@ def _hull_data(points):
                 edge_normals.append((linked[0], linked[0]))
             else:
                 edge_normals.append((linked[0], linked[1]))
+        # Wireframe only: real hull edges, without the diagonals between
+        # coplanar triangles and the vertices sitting on straight edges.
+        clean = _clean_hull_edges(bm, hull_center) if wire else None
+        if clean is not None:
+            edges, edge_normals = clean
     finally:
         bm.free()
     return hull_verts, faces, tris, tri_normals, tri_centers, edges, edge_normals
+
+
+_MIN_WIRE_DISSOLVE = math.radians(0.5)
+
+
+def _wire_dissolve_angle():
+    """Dissolve angle for the wireframe: the creation path's
+    ``cursor_bbox_hull_dissolve_angle`` when larger than 0.5 degrees."""
+    try:
+        deg = float(bpy.context.scene.cursor_bbox_hull_dissolve_angle)
+    except Exception:
+        return _MIN_WIRE_DISSOLVE
+    if deg != deg:  # NaN
+        return _MIN_WIRE_DISSOLVE
+    return max(_MIN_WIRE_DISSOLVE, math.radians(deg))
+
+
+def _clean_hull_edges(bm, hull_center):
+    """``(edges, edge_normals)`` of a copy of the hull bmesh *bm* after a
+    planar ``dissolve_limit``: flat LINES vertex pairs and one ``(n1, n2)``
+    of outward unit face normals per edge (parallel lists, same layout as
+    ``_hull_data``'s raw ones). None when the dissolve fails or leaves no
+    edges (the caller keeps the raw edges). *bm* is not modified."""
+    tmp = None
+    try:
+        tmp = bm.copy()
+        bmesh.ops.dissolve_limit(
+            tmp, angle_limit=_wire_dissolve_angle(), use_dissolve_boundaries=True,
+            verts=list(tmp.verts), edges=list(tmp.edges), delimit={'NORMAL'})
+        tmp.verts.ensure_lookup_table()
+        tmp.edges.ensure_lookup_table()
+        tmp.faces.ensure_lookup_table()
+        if not tmp.edges or not tmp.faces:
+            return None
+        bmesh.ops.recalc_face_normals(tmp, faces=tmp.faces)
+        tmp.faces.index_update()
+        zero = Vector((0.0, 0.0, 0.0))
+        face_normals = []
+        for f in tmp.faces:
+            n = f.normal.copy()
+            if n.length_squared < 1e-30:
+                face_normals.append(zero)
+                continue
+            n.normalize()
+            # Outward = away from the hull centre (convex hull).
+            if n.dot(f.calc_center_median() - hull_center) < 0.0:
+                n = -n
+            face_normals.append(n)
+        edges = []
+        edge_normals = []
+        for e in tmp.edges:
+            edges.append(e.verts[0].co.copy())
+            edges.append(e.verts[1].co.copy())
+            linked = [face_normals[f.index] for f in e.link_faces
+                      if 0 <= f.index < len(face_normals)]
+            if not linked:
+                edge_normals.append((zero, zero))
+            elif len(linked) == 1:
+                edge_normals.append((linked[0], linked[0]))
+            else:
+                edge_normals.append((linked[0], linked[1]))
+        if not edges:
+            return None
+        return edges, edge_normals
+    except Exception as e:
+        print(f"Split: wireframe dissolve failed, keeping the raw edges: {e}")
+        return None
+    finally:
+        if tmp is not None:
+            tmp.free()
 
 
 def make_piece(polys, color_index, uid=None):
@@ -190,7 +272,7 @@ def hull_volume(points):
     if not hs.is_solid(points, _points_eps(points)):
         return 0.0
     try:
-        data = _hull_data(points)
+        data = _hull_data(points, wire=False)
     except Exception as e:
         print(f"Split: failed to build a union hull: {e}")
         return 0.0
@@ -209,7 +291,7 @@ def hull_planes(points, tol):
     if not hs.is_solid(points, _points_eps(points)):
         return []
     try:
-        data = _hull_data(points)
+        data = _hull_data(points, wire=False)
     except Exception as e:
         print(f"Split: failed to build a region hull: {e}")
         return []
@@ -405,14 +487,17 @@ def pick_piece(context, pieces, mouse):
 # PICK / FRESH / PICK_HOVER are the Split mode's piece-selection state: an
 # even, stronger fill for every piece so the decomposition reads as blocks,
 # white outlines for the pieces of the last cut and the piece under the mouse.
+# Toned down at the user's request; keep these values: fills x0.85,
+# coloured edges x0.70, outlines 0.50 (active / preview / fresh) and 0.65
+# (hovered), no line wider than 1.5.
 _ROLE_STYLE = {
-    'INACTIVE': (0.10, 0.30, False, 1.0, False),
-    'HOVER': (0.16, 0.55, False, 1.0, True),
-    'ACTIVE': (0.20, 0.75, True, 1.75, True),
-    'PREVIEW': (0.22, 0.75, True, 1.75, True),
-    'PICK': (0.22, 0.45, False, 1.0, False),
-    'FRESH': (0.22, 0.85, True, 1.75, True),
-    'PICK_HOVER': (0.38, 0.95, True, 2.0, True),
+    'INACTIVE': (0.085, 0.21, False, 1.0, False),
+    'HOVER': (0.136, 0.65, False, 1.5, True),
+    'ACTIVE': (0.17, 0.50, True, 1.5, True),
+    'PREVIEW': (0.187, 0.50, True, 1.5, True),
+    'PICK': (0.187, 0.315, False, 1.0, False),
+    'FRESH': (0.187, 0.50, True, 1.5, True),
+    'PICK_HOVER': (0.323, 0.65, True, 1.5, True),
 }
 _ROLE_ORDER = {'INACTIVE': 0, 'HOVER': 1, 'ACTIVE': 2, 'PREVIEW': 2,
                'PICK': 0, 'FRESH': 1, 'PICK_HOVER': 2}
