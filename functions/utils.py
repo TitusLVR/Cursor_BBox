@@ -1369,6 +1369,18 @@ def apply_collision_material_color(mat, rgba):
             mat.blend_method = 'BLEND' if translucent else 'OPAQUE'
     except Exception as e:
         print(f"Cursor BBox: cannot set material blend mode: {e}")
+    # A translucent hull must not show its own far side through the near
+    # one (EEVEE / Material Preview): cull back faces and do not blend the
+    # material's own surfaces over each other.
+    for attr, value in (("use_backface_culling", True),
+                        ("use_backface_culling_shadow", True),
+                        ("use_transparency_overlap", False),   # EEVEE Next
+                        ("show_transparent_back", False)):     # legacy EEVEE
+        if hasattr(mat, attr):
+            try:
+                setattr(mat, attr, value)
+            except Exception as e:
+                print(f"Cursor BBox: cannot set material {attr}: {e}")
 
 
 def ensure_cbb_material(context):
