@@ -334,6 +334,74 @@ class VolumeAndBoxTests(unittest.TestCase):
         self.assertEqual(hs.min_width(pts, [(0.0, 0.0, 0.0)]), 0.0)
 
 
+def _box_thickness(box):
+    lo, hi = box
+    return min(hi[k] - lo[k] for k in range(3))
+
+
+def _fake_union_thickness(boxes):
+    """Thickness of the bbox union of the boxes in a member set (the fake
+    union hull is that bbox)."""
+    def union_thickness(members):
+        lo = tuple(min(boxes[i][0][k] for i in members) for k in range(3))
+        hi = tuple(max(boxes[i][1][k] for i in members) for k in range(3))
+        return _box_thickness((lo, hi))
+    return union_thickness
+
+
+class FlatMergeTests(unittest.TestCase):
+    # Two thin parallel beams 0.3 apart (gap 0.31 admits them: float error) in one plane (z 0..0.1): the union
+    # is 60% void, as thin as the beams.
+    COPLANAR = [((0.0, 0.0, 0.0), (0.1, 1.0, 0.1)), ((0.4, 0.0, 0.0), (0.5, 1.0, 0.1))]
+    # The same beams stacked 0.3 apart: the union is much thicker.
+    STACKED = [((0.0, 0.0, 0.0), (1.0, 1.0, 0.1)), ((0.0, 0.0, 0.4), (1.0, 1.0, 0.5))]
+
+    def _run(self, boxes, gap, cost, flat):
+        union, _calls = _fake_union(boxes)
+        vols = [_box_volume(b) for b in boxes]
+        return hs.plan_merges(vols, boxes, gap, cost, union,
+                              union_thickness=_fake_union_thickness(boxes),
+                              thicknesses=[_box_thickness(b) for b in boxes], flat=flat)
+
+    def test_coplanar_plates_merge_only_with_flat(self):
+        self.assertEqual(self._run(self.COPLANAR, 0.31, 0.25, flat=False), [[0], [1]])
+        self.assertEqual(self._run(self.COPLANAR, 0.31, 0.25, flat=True), [[0, 1]])
+
+    def test_gap_still_decides(self):
+        self.assertEqual(self._run(self.COPLANAR, 0.2, 0.25, flat=True), [[0], [1]])
+
+    def test_stacked_plates_do_not_flat_merge(self):
+        self.assertEqual(self._run(self.STACKED, 0.31, 0.25, flat=True), [[0], [1]])
+
+    def test_grid_of_beams_becomes_one_slab(self):
+        # Three parallel beams and one across them, all in z 0..0.1.
+        boxes = [((0.0, 0.0, 0.0), (0.1, 1.0, 0.1)), ((0.4, 0.0, 0.0), (0.5, 1.0, 0.1)),
+                 ((0.8, 0.0, 0.0), (0.9, 1.0, 0.1)), ((0.0, 0.45, 0.0), (0.9, 0.55, 0.1))]
+        self.assertEqual(self._run(boxes, 0.31, 0.25, flat=True), [[0, 1, 2, 3]])
+
+    def test_staircase_does_not_drift_into_one_group(self):
+        # 20 touching plates 0.1 thick, each 0.02 higher than the previous:
+        # each step is within 25% of the group before it, but the whole is
+        # 0.48 thick (almost 5x a plate). A group's limit must stay tied to
+        # its thickest ORIGINAL plate.
+        boxes = [((float(i), 0.0, 0.02 * i), (i + 1.0, 1.0, 0.02 * i + 0.1)) for i in range(20)]
+        groups = self._run(boxes, 0.01, 0.05, flat=True)
+        self.assertGreater(len(groups), 1)
+        union_t = _fake_union_thickness(boxes)
+        for g in groups:
+            self.assertLessEqual(union_t(frozenset(g)), 0.1 * hs.FLAT_FACTOR + 1e-6)
+
+    def test_default_arguments_are_the_classic_rule(self):
+        union, _calls = _fake_union(self.COPLANAR)
+        vols = [_box_volume(b) for b in self.COPLANAR]
+        classic = hs.plan_merges(vols, self.COPLANAR, 0.31, 0.25, union)
+        self.assertEqual(classic, [[0], [1]])
+        # flat=True without the thickness inputs is the classic rule too.
+        self.assertEqual(hs.plan_merges(vols, self.COPLANAR, 0.31, 0.25, union, flat=True),
+                         [[0], [1]])
+        self.assertEqual(hs.plan_merges(vols, self.COPLANAR, 0.31, 0.7, union), [[0, 1]])
+
+
 class PlanMergesTests(unittest.TestCase):
     def _run(self, boxes, gap, cost):
         union, calls = _fake_union(boxes)
@@ -539,6 +607,63 @@ class PickSnapTests(unittest.TestCase):
         t, d = hs.closest_on_segment_2d((5.0, 5.0), (0.0, 0.0), (10.0, 0.0))
         self.assertAlmostEqual(t, 0.5)
         self.assertAlmostEqual(d, 5.0)
+
+
+def _cube_tris():
+    flat = []
+    for poly in _cube_polys():
+        for i in range(1, len(poly) - 1):
+            flat.extend((poly[0], poly[i], poly[i + 1]))
+    return flat
+
+
+def _poly_area(points):
+    return _area(tuple(points))
+
+
+class SectionTests(unittest.TestCase):
+    def test_horizontal_cut_is_the_unit_square(self):
+        sec = hs.section_polygon(_cube_tris(), (0.0, 0.0, 0.5), (0.0, 0.0, 1.0), 1e-9)
+        self.assertEqual(len(sec), 4)
+        for p in sec:
+            self.assertAlmostEqual(p[2], 0.5)
+        self.assertAlmostEqual(_poly_area(sec), 1.0)
+
+    def test_diagonal_cut_is_a_rectangle(self):
+        s = 2 ** -0.5
+        sec = hs.section_polygon(_cube_tris(), (0.5, 0.5, 0.5), (s, s, 0.0), 1e-9)
+        self.assertEqual(len(sec), 4)
+        self.assertAlmostEqual(_poly_area(sec), 2 ** 0.5)
+
+    def test_missing_plane_gives_nothing(self):
+        self.assertEqual(hs.section_polygon(_cube_tris(), (0, 0, 5.0), (0, 0, 1.0), 1e-9), [])
+
+    def test_plane_through_a_face_has_no_duplicates(self):
+        sec = hs.section_polygon(_cube_tris(), (0, 0, 1.0), (0, 0, 1.0), 1e-9)
+        self.assertIn(len(sec), (0, 4))
+        self.assertEqual(len(set(sec)), len(sec))
+        if sec:
+            self.assertAlmostEqual(_poly_area(sec), 1.0)
+
+    def test_order_is_counter_clockwise_around_the_normal(self):
+        sec = hs.section_polygon(_cube_tris(), (0.0, 0.0, 0.5), (0.0, 0.0, 1.0), 1e-9)
+        # Signed area (shoelace in XY) is positive for CCW seen from +Z.
+        signed = sum(sec[i][0] * sec[(i + 1) % 4][1] - sec[(i + 1) % 4][0] * sec[i][1]
+                     for i in range(4)) / 2.0
+        self.assertGreater(signed, 0.0)
+
+    def test_polygon_area(self):
+        sec = hs.section_polygon(_cube_tris(), (0.0, 0.0, 0.5), (0.0, 0.0, 1.0), 1e-9)
+        self.assertAlmostEqual(hs.polygon_area(sec), 1.0)
+        tilted = [(0.0, 0.0, 0.0), (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (0.0, 1.0, 0.0)]
+        self.assertAlmostEqual(hs.polygon_area(tilted), 2 ** 0.5)
+        self.assertEqual(hs.polygon_area([(0, 0, 0), (1, 0, 0)]), 0.0)
+
+    def test_scale_polygon_scales_the_area(self):
+        sec = hs.section_polygon(_cube_tris(), (0.0, 0.0, 0.5), (0.0, 0.0, 1.0), 1e-9)
+        big = hs.scale_polygon(sec, 1.12)
+        self.assertAlmostEqual(_poly_area(big), 1.12 ** 2)
+        self.assertEqual(hs.scale_polygon([], 2.0), [])
 
 
 if __name__ == "__main__":

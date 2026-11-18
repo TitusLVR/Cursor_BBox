@@ -25,6 +25,14 @@ RMB makes the piece under the mouse active, Shift+RMB merges it into the
 active one, in both modes. The source meshes are never modified: pieces hold
 clipped copies of the polygons in memory.
 
+``M`` (both modes, 2+ pieces) toggles the MERGE state (``split_state ==
+'MERGE'``; Islands mode uses the field only for this): LMB on a piece sets
+the merge base, then LMB on other pieces merges them into the base (one
+undo step each), RMB re-picks the base; hovering another piece previews
+the merged hull. Pieces are drawn solid and the source objects are hidden
+while MERGE lasts; ``M`` / ``TAB`` leave it (also automatically when one
+piece is left).
+
 ``Q`` (both modes) picks an existing collision object under the mouse and
 turns it into a piece: the source polygons clipped to that object's convex
 hull (or its own polygons when no source geometry lies inside), so the work
@@ -67,6 +75,7 @@ from ..functions.core import (
     clear_preview_faces,
 )
 from ..functions.utils import (
+    clear_all_caches,
     place_cursor_with_raycast_and_edge,
     build_all_faces_dict,
     get_evaluated_mesh,
@@ -94,7 +103,7 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Pick: make piece active, back to cutting", "LMB / RMB"),
     HUDItem("Toggle cut / pick piece", "TAB"),
     HUDItem("Make piece under mouse active", "RMB"),
-    HUDItem("Merge piece under mouse into active", "Shift+RMB / Shift+LMB (pick)"),
+    HUDItem("Quick merge into active, stay picking (TAB to cut)", "Shift+LMB / Shift+RMB"),
     HUDItem("Hover a face / edge / vertex: cut by its plane / along the edge / "
             "through the vertex", "Mouse"),
     HUDItem("Plane: face / across X / across Y", "R"),
@@ -102,6 +111,7 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Plane offset 2% / 0.2%", "Alt+Wheel / Alt+Shift+Wheel"),
     HUDItem("Equal slabs", "2..9"),
     HUDItem("Explode active piece, go to Islands mode", "L"),
+    HUDItem("Merge mode: click a base, then click pieces to merge into it", "M"),
     HUDItem("Delete active piece", "X"),
     HUDItem("Edit existing collision under cursor", "Q"),
     HUDItem("Load existing collisions", "Shift+Q"),
@@ -117,6 +127,8 @@ ISLANDS_HELP_ITEMS = [
     HUDItem("Merge gap", "Ctrl+Wheel"),
     HUDItem("Merge void %", "Shift+Wheel"),
     HUDItem("Ignore thinner", "Ctrl+Shift+Wheel"),
+    HUDItem("Flat merge (coplanar parts ignore void %)", "F"),
+    HUDItem("Merge mode: click a base, then click pieces to merge into it", "M"),
     HUDItem("Delete active piece", "X"),
     HUDItem("Edit existing collision under cursor", "Q"),
     HUDItem("Load existing collisions", "Shift+Q"),
@@ -144,6 +156,8 @@ _CONFIRM_KEYS = {'SPACE', 'RET', 'NUMPAD_ENTER'}
 # every MOUSEMOVE to the timer.
 _PREVIEW_BUDGET = 0.040
 _TIMER_INTERVAL = 0.1
+# Merge previews kept (keyed by uid pairs); the cache is emptied when full.
+_MERGE_CACHE_MAX = 32
 
 # Auto-merge parameter limits (see _split_wheel_param).
 # Merge gap: lower bound only (no upper limit, at the user's request).
@@ -254,6 +268,9 @@ class SplitMixin:
         self.split_merge_gap = 0.01
         self.split_merge_cost = 0.25
         self.split_ignore_thin = 0.0
+        # Flat-merge rule: coplanar parts merge within the gap whatever the
+        # void (F in Islands).
+        self.split_merge_flat = True
         self._split_auto = None
         self._split_param_streak = False
         # Existing collision objects turned into pieces (Q, Shift+Q, autoload),
@@ -279,8 +296,22 @@ class SplitMixin:
         # (world points), 'edge' (a, b) or None, 'vertex' or None, 'origin'
         # and, for an edge, 'normal' of the plane; None when nothing is hovered.
         self._split_snap = None
-        # Base plane (origin, normal; no offset) stored when F froze it.
+        # Base plane (origin, normal; no offset) stored when F froze it, and
+        # the plane preview's direction hint of that moment.
         self._split_frozen_plane = None
+        self._split_frozen_axis = None
+        # MERGE state: uid of the base piece (None: not chosen yet).
+        self._split_merge_base = None
+        # Split PICK: uid of the Shift+click merge target (None: not set).
+        self._split_quick_target = None
+        # Merge-preview hulls {(base uid, other uid): Piece or None}; uids
+        # never change geometry, so entries never go stale (size-capped).
+        self._split_merge_cache = {}
+        # The hover wanted a preview not built yet (last build over budget).
+        self._split_merge_dirty = False
+        self._split_merge_cost = 0.0
+        # Sources hidden for MERGE: {'names', 'selected', 'active'} or None.
+        self._split_hidden_sources = None
         self._split_preview_reset()
 
     def _split_preview_reset(self):
@@ -305,6 +336,11 @@ class SplitMixin:
         self._split_remainder_uid = None
         self._split_snap = None
         self._split_frozen_plane = None
+        self._split_merge_base = None
+        self._split_quick_target = None
+        self._split_merge_cache = {}
+        self._split_merge_dirty = False
+        self._split_show_sources(None)
         self._split_unhide_picked()
         try:
             window = bpy.context.window
@@ -327,6 +363,8 @@ class SplitMixin:
     def _split_mode_label(self):
         """Mode name for the HUD, or None outside split mode."""
         if getattr(self, 'split_mode', False):
+            if self._split_merging():
+                return "ISLANDS: MERGE" if self._split_islands() else "SPLIT: MERGE"
             if self._split_islands():
                 return "ISLANDS"
             return "SPLIT: PICK PIECE" if self._split_picking() else "SPLIT: CUT"
@@ -341,6 +379,103 @@ class SplitMixin:
         return (not self._split_islands()
                 and getattr(self, 'split_state', 'CUT') == 'PICK')
 
+    def _split_merging(self):
+        """True in the MERGE state (either kind): no plane, no preview,
+        solid pieces, sources hidden."""
+        return getattr(self, 'split_state', 'CUT') == 'MERGE'
+
+    def _split_no_plane(self):
+        """True when there is no cutting plane: Islands, PICK or MERGE."""
+        return self._split_islands() or self._split_picking() or self._split_merging()
+
+    def _split_normal_state(self):
+        """The state MERGE returns to: PICK in Split (CUT with one piece, see
+        _split_set_state), the plain state in Islands."""
+        return 'CUT' if self._split_islands() else 'PICK'
+
+    def _split_base_index(self):
+        """Index of the MERGE base piece, or None."""
+        uid = getattr(self, '_split_merge_base', None)
+        if uid is None:
+            return None
+        for i, piece in enumerate(self.split_pieces):
+            if piece.uid == uid:
+                return i
+        return None
+
+    # ----- MERGE: hiding the source objects -----
+
+    def _split_hide_sources(self, context):
+        """Hide the visible source objects for MERGE, remembering which were
+        selected and the active object (hide_set deselects)."""
+        if getattr(self, '_split_hidden_sources', None) is not None:
+            return
+        record = {'names': [], 'selected': [], 'active': None}
+        try:
+            active = context.view_layer.objects.active
+            record['active'] = active.name if active is not None else None
+        except Exception:
+            pass
+        for obj in (self.original_selected_objects or ()):
+            try:
+                if obj.hide_get():
+                    continue    # hidden before MERGE: stays hidden
+                name = obj.name
+                if obj.select_get():
+                    record['selected'].append(name)
+                obj.hide_set(True)
+                record['names'].append(name)
+            except Exception as e:
+                print(f"Split: could not hide a source object: {e}")
+        self._split_hidden_sources = record
+
+    def _split_show_sources(self, context):
+        """Show the sources hidden for MERGE again and restore their
+        selection and the active object. *context* may be None (shutdown):
+        objects are looked up by name; missing ones are skipped. Never
+        raises."""
+        record = getattr(self, '_split_hidden_sources', None)
+        self._split_hidden_sources = None
+        if not record:
+            return
+        try:
+            view_layer = (context.view_layer if context is not None
+                          else bpy.context.view_layer)
+        except Exception:
+            view_layer = None
+        for name in record['names']:
+            try:
+                obj = bpy.data.objects.get(name)
+                if obj is not None:
+                    obj.hide_set(False)
+            except Exception as e:
+                print(f"Split: could not show {name!r} again: {e}")
+        for name in record['selected']:
+            try:
+                obj = bpy.data.objects.get(name)
+                if obj is not None:
+                    obj.select_set(True)
+            except Exception as e:
+                print(f"Split: could not reselect {name!r}: {e}")
+        if record['active'] is not None and view_layer is not None:
+            try:
+                obj = bpy.data.objects.get(record['active'])
+                if obj is not None:
+                    view_layer.objects.active = obj
+            except Exception as e:
+                print(f"Split: could not restore the active object: {e}")
+        try:
+            clear_all_caches()
+        except Exception as e:
+            print(f"Split: could not clear the raycast caches: {e}")
+
+    def _split_sync_sources(self, context):
+        """Sources hidden exactly while in MERGE (split mode on)."""
+        if getattr(self, 'split_mode', False) and self._split_merging():
+            self._split_hide_sources(context)
+        else:
+            self._split_show_sources(context)
+
     def _split_update_cursor(self, context):
         """Mouse cursor as mode feedback: knife while cutting, hand while
         picking pieces (Split PICK, Islands); restored outside split mode.
@@ -351,6 +486,8 @@ class SplitMixin:
                 return
             if not getattr(self, 'split_mode', False):
                 window.cursor_modal_restore()
+            elif self._split_merging():
+                window.cursor_modal_set('CROSSHAIR')
             elif self._split_islands() or self._split_picking():
                 window.cursor_modal_set('HAND')
             else:
@@ -359,17 +496,25 @@ class SplitMixin:
             print(f"Split: could not set the mouse cursor: {e}")
 
     def _split_set_state(self, context, state):
-        """Switch Split mode between 'CUT' and 'PICK' (PICK needs 2+ pieces).
-        Leaving PICK forgets the fresh pieces."""
-        if state == 'PICK' and len(self.split_pieces) < 2:
+        """Switch between 'CUT', 'PICK' and 'MERGE' (PICK and MERGE need 2+
+        pieces). Leaving PICK forgets the fresh pieces; leaving MERGE forgets
+        the base and shows the sources again (entering hides them)."""
+        if state == 'MERGE' and len(self.split_pieces) < 2:
+            state = self._split_normal_state()
+        if state == 'PICK' and (len(self.split_pieces) < 2 or self._split_islands()):
             state = 'CUT'
         if state != 'PICK':
             self._split_fresh = set()
+            self._split_quick_target = None
+        if state != 'MERGE':
+            self._split_merge_base = None
+            self._split_merge_dirty = False
         if not self.split_frozen:
             # Re-chosen on the next hover (or by _split_follow_mouse).
             self._split_snap = None
         self.split_state = state
         self._split_preview_reset()
+        self._split_sync_sources(context)
         self._split_update_cursor(context)
 
     def _split_add_hud_params(self, hud):
@@ -389,7 +534,11 @@ class SplitMixin:
             "Snap",
             lambda: (_SNAP_NAMES.get(self._split_snap['kind'], "-")
                      if getattr(self, '_split_snap', None) else "-"),
-            visible_getter=lambda: visible_split() and not self._split_picking()))
+            visible_getter=lambda: (visible_split() and not self._split_picking()
+                                    and not self._split_merging())))
+        hud.add_param(HUDParam(
+            "Merge base", lambda: "set" if self._split_base_index() is not None else "-",
+            visible_getter=lambda: visible() and self._split_merging()))
         hud.add_param(HUDParam(
             "Offset", lambda: self.split_offset, kind="float", fmt="{:.4f}",
             visible_getter=visible_split))
@@ -402,6 +551,9 @@ class SplitMixin:
         hud.add_param(HUDParam(
             "Ignore thinner",
             lambda: "off" if self.split_ignore_thin <= 0.0 else f"{self.split_ignore_thin:.3f}",
+            visible_getter=visible_islands))
+        hud.add_param(HUDParam(
+            "Flat merge", lambda: self.split_merge_flat, kind="bool",
             visible_getter=visible_islands))
         hud.add_param(HUDParam(
             "Islands", lambda: "live",
@@ -445,6 +597,30 @@ class SplitMixin:
             return None
         origin, normal = base
         return origin + normal * self.split_offset, normal.copy()
+
+    def _split_live_plane_axis(self, context):
+        """In-plane direction hint for the plane preview's fallback square:
+        the hovered edge (EDGE snap), the hovered face's first edge (FACE /
+        VERTEX snap), else the 3D cursor's X axis. None when unavailable."""
+        snap = getattr(self, '_split_snap', None)
+        try:
+            if snap is not None:
+                if snap.get('kind') == 'EDGE' and snap.get('edge'):
+                    a, b = snap['edge']
+                    return Vector(b) - Vector(a)
+                face = snap.get('face') or ()
+                if len(face) >= 2:
+                    return Vector(face[1]) - Vector(face[0])
+            return Vector(context.scene.cursor.matrix.col[0][:3])
+        except Exception:
+            return None
+
+    def _split_plane_axis(self, context):
+        """The hint for the current plane: the one stored when F froze it,
+        else the live one."""
+        if self.split_frozen and getattr(self, '_split_frozen_plane', None) is not None:
+            return getattr(self, '_split_frozen_axis', None)
+        return self._split_live_plane_axis(context)
 
     def _split_track_mouse(self, context, event):
         """Split CUT, plane not frozen: put the 3D cursor on the hovered face,
@@ -635,13 +811,23 @@ class SplitMixin:
         return self._split_compute_cut(plane, key)
 
     def _split_refresh(self, context):
+        if self._split_merging() and len(self.split_pieces) < 2:
+            # One piece left: nothing to merge, leave MERGE.
+            self._split_set_state(context, self._split_normal_state())
+            self.report({'INFO'}, "One piece left: merge mode off")
         if self._split_picking() and len(self.split_pieces) < 2:
             # A single piece has nothing to pick from: always cutting.
             self._split_set_state(context, 'CUT')
         picking = self._split_picking()
-        if self._split_islands() or picking:
-            # Islands mode and piece picking have no cutting plane: no plane
-            # quad, no cut preview.
+        merging = self._split_merging()
+        # Safety net: sources hidden exactly while MERGE lasts.
+        self._split_sync_sources(context)
+        if merging:
+            self._split_update_merge_preview()
+        merge_preview = self._split_current_merge_preview() if merging else None
+        if self._split_islands() or picking or merging:
+            # Islands mode, piece picking and merging have no cutting plane:
+            # no plane quad, no cut preview.
             plane, preview = None, None
         else:
             self._split_update_preview(context)
@@ -649,9 +835,13 @@ class SplitMixin:
             preview = None if self._split_preview_dirty else self._split_preview_pieces
         data = overlay_geometry(
             self.split_pieces, self.split_active, self._split_hover, plane, preview,
-            pick=picking, fresh=self._split_fresh if picking else ())
+            pick=picking, fresh=self._split_fresh if picking else (),
+            pick_base=self._split_quick_target_index() if picking else None,
+            merge=merging, base=self._split_base_index() if merging else None,
+            merge_preview=merge_preview,
+            plane_axis=self._split_plane_axis(context) if plane is not None else None)
         snap = self._split_snap
-        if snap is not None and not self._split_islands() and not picking:
+        if snap is not None and not self._split_no_plane():
             # Hover feedback for draw_split_overlay (Split CUT only).
             data['snap'] = {'kind': snap['kind'], 'face': snap['face'],
                             'edge': snap['edge'], 'vertex': snap['vertex']}
@@ -683,6 +873,16 @@ class SplitMixin:
         self._split_hover = self._split_pick(context)
         if state == 'PICK' and len(pieces) < 2:
             self.split_state = 'CUT'
+        if state == 'MERGE' and len(pieces) < 2:
+            self.split_state = self._split_normal_state()
+            if self.split_state == 'PICK':
+                self.split_state = 'CUT'
+        # The MERGE base and the quick-merge target never survive undo /
+        # redo; sources follow the restored state.
+        self._split_merge_base = None
+        self._split_quick_target = None
+        self._split_merge_dirty = False
+        self._split_sync_sources(context)
         self._split_update_cursor(context)
 
     def _split_enter(self, context, event, kind='SPLIT'):
@@ -848,16 +1048,62 @@ class SplitMixin:
             return
         self._split_track_mouse(context, event)
 
+    def _split_quick_target_index(self):
+        """Index of the Shift+click merge target in Split PICK, or None."""
+        uid = getattr(self, '_split_quick_target', None)
+        if uid is None:
+            return None
+        for i, piece in enumerate(self.split_pieces):
+            if piece.uid == uid:
+                return i
+        return None
+
+    def _split_quick_merge(self, context, from_cut):
+        """Split kind, Shift+LMB / Shift+RMB: merge the piece under the mouse
+        into the active one and stay in (or go to) PICK, so more pieces can
+        be Shift+clicked; TAB or a plain LMB pick resumes cutting.
+
+        From CUT (*from_cut*): the active piece is the target; the active
+        piece itself or nothing under the mouse is a no-op (no cut). In PICK
+        without a target yet (e.g. right after a cut) the first Shift+click
+        only makes the clicked piece the target (and active)."""
+        idx = self._split_pick(context)
+        if idx is None:
+            return
+        if from_cut:
+            if idx == self.split_active:
+                return
+            if self._split_merge(context, idx):
+                self._split_set_state(context, 'PICK')
+                if self._split_picking():
+                    self._split_quick_target = self.split_pieces[self.split_active].uid
+            return
+        target = self._split_quick_target_index()
+        if target is None:
+            self._split_set_active(idx)
+            self._split_hover = idx
+            self._split_quick_target = self.split_pieces[idx].uid
+            self.report({'INFO'}, "Merge target set: Shift+click pieces to merge into it")
+            return
+        if idx == target:
+            return
+        self._split_set_active(target)
+        if self._split_merge(context, idx):
+            self._split_quick_target = self.split_pieces[self.split_active].uid
+
     def _split_pick_state_click(self, context, event, merge):
         """LMB / RMB in Split mode's PICK state: a piece under the mouse
-        becomes active and cutting resumes; *merge* (Shift) merges it into
-        the active piece and stays in PICK. Nothing under the mouse: stay."""
+        becomes active and cutting resumes; *merge* (Shift) is the quick
+        merge (see _split_quick_merge) and stays in PICK. Nothing under the
+        mouse: stay."""
+        if merge:
+            self._split_quick_merge(context, from_cut=False)
+            self._split_refresh(context)
+            return
         idx = self._split_pick(context)
         if idx is None:
             self._split_refresh(context)
             return
-        if merge:
-            self._split_merge(context, idx)
         else:
             self._split_set_active(idx)
             self._split_hover = idx
@@ -910,15 +1156,19 @@ class SplitMixin:
             msg += f" ({skipped} empty skipped)"
         self.report({'INFO'}, msg)
 
-    def _split_merge(self, context, index):
+    def _split_merge(self, context, index, merged=None):
+        """Merge piece *index* into the active one (undoable). *merged* is
+        an already built hull of the two (the MERGE preview), else it is
+        built here. Returns True when merged."""
         if index is None or index == self.split_active:
-            return
+            return False
         active = self.split_pieces[self.split_active]
         other = self.split_pieces[index]
-        merged = make_piece(active.polys + other.polys, active.color_index)
+        if merged is None:
+            merged = make_piece(active.polys + other.polys, active.color_index)
         if merged is None:
             self.report({'WARNING'}, "Merge failed")
-            return
+            return False
         self._split_undo.push(self._split_snapshot())
         self._split_end_auto()
         self._split_pristine = False
@@ -928,6 +1178,92 @@ class SplitMixin:
         self._split_set_active(new_active)
         self._split_hover = self._split_pick(context)
         self.report({'INFO'}, f"Merged: {len(self.split_pieces)} pieces")
+        return True
+
+    # ----- MERGE state -----
+
+    def _split_toggle_merge(self, context, event):
+        """M: enter / leave the MERGE state."""
+        if self._split_merging():
+            self._split_set_state(context, self._split_normal_state())
+            if not self._split_no_plane():
+                self._split_follow_mouse(context, event)
+            self.report({'INFO'}, "Merge mode off")
+        elif len(self.split_pieces) < 2:
+            self.report({'INFO'}, "Only one piece: nothing to merge")
+            return
+        else:
+            # A meaningful active piece becomes the base: Split CUT or
+            # Islands; coming from PICK there is none yet.
+            had_base = self._split_islands() or not self._split_picking()
+            self._split_set_state(context, 'MERGE')
+            if had_base and 0 <= self.split_active < len(self.split_pieces):
+                self._split_merge_base = self.split_pieces[self.split_active].uid
+            self.report({'INFO'}, "Merge mode: click a base piece, then click pieces "
+                                  "to merge into it. M / TAB to leave")
+        self._split_hover = self._split_pick(context)
+        self._split_refresh(context)
+
+    def _split_merge_click(self, context, set_base):
+        """LMB (*set_base* False) / RMB (*set_base* True) in MERGE."""
+        idx = self._split_pick(context)
+        if idx is None:
+            return
+        base = self._split_base_index()
+        if set_base or base is None:
+            self._split_merge_base = self.split_pieces[idx].uid
+            self._split_set_active(idx)
+            self._split_hover = idx
+            return
+        if idx == base:
+            return
+        other = self.split_pieces[idx]
+        merged = self._split_merge_cache.get((self.split_pieces[base].uid, other.uid))
+        self._split_set_active(base)
+        if self._split_merge(context, idx, merged=merged):
+            # The merged piece (now active) is the new base.
+            self._split_merge_base = self.split_pieces[self.split_active].uid
+
+    def _split_merge_preview_key(self):
+        """``(base uid, hovered uid)`` the preview should show, or None."""
+        base = self._split_base_index()
+        hover = self._split_hover
+        if base is None or hover is None or hover == base \
+                or not 0 <= hover < len(self.split_pieces):
+            return None
+        return (self.split_pieces[base].uid, self.split_pieces[hover].uid)
+
+    def _split_update_merge_preview(self, force=False):
+        """Build the merge preview of the current hover when missing; over
+        the time budget (last build) only mark it dirty for the timer
+        unless *force*."""
+        key = self._split_merge_preview_key()
+        if key is None or key in self._split_merge_cache:
+            self._split_merge_dirty = False
+            return
+        if not force and self._split_merge_cost > _PREVIEW_BUDGET:
+            self._split_merge_dirty = True
+            return
+        base = self.split_pieces[self._split_base_index()]
+        other = self.split_pieces[self._split_hover]
+        t0 = time.perf_counter()
+        try:
+            piece = make_piece(base.polys + other.polys, base.color_index)
+        except Exception as e:
+            print(f"Split: merge preview failed: {e}")
+            piece = None
+        self._split_merge_cost = time.perf_counter() - t0
+        if len(self._split_merge_cache) >= _MERGE_CACHE_MAX:
+            self._split_merge_cache.clear()
+        self._split_merge_cache[key] = piece
+        self._split_merge_dirty = False
+
+    def _split_current_merge_preview(self):
+        """The cached merge preview Piece for the current hover, or None."""
+        key = self._split_merge_preview_key()
+        if key is None:
+            return None
+        return self._split_merge_cache.get(key)
 
     def _split_delete(self, context):
         if len(self.split_pieces) <= 1:
@@ -998,7 +1334,8 @@ class SplitMixin:
         iset = record['islands']
         try:
             groups, ignored = iset.groups(
-                self.split_merge_gap, self.split_merge_cost, self.split_ignore_thin)
+                self.split_merge_gap, self.split_merge_cost, self.split_ignore_thin,
+                flat=self.split_merge_flat)
             # Same colours for the same group positions on every re-grouping.
             counter = [record['color_base']]
 
@@ -1046,6 +1383,17 @@ class SplitMixin:
             v = round(self.split_merge_cost + (0.05 if up else -0.05), 2)
             self.split_merge_cost = min(_COST_RANGE[1], max(_COST_RANGE[0], v))
             label = f"Merge void: {int(round(self.split_merge_cost * 100))}%"
+        self._split_param_changed(context, label)
+
+    def _split_toggle_flat(self, context):
+        """F in Islands: toggle the flat-merge rule (re-groups while live)."""
+        self.split_merge_flat = not self.split_merge_flat
+        self._split_param_changed(
+            context, "Flat merge: " + ("ON" if self.split_merge_flat else "OFF"))
+
+    def _split_param_changed(self, context, label):
+        """Report a changed auto-merge parameter and, while the last explode
+        is live, re-group it (consecutive changes share one undo entry)."""
         record = self._split_auto
         if record is None:
             self.report({'INFO'}, label)
@@ -1554,7 +1902,11 @@ class SplitMixin:
         # Timer: compute a preview that was deferred (over budget). Never
         # consumed, so the host / HUD still see it.
         if etype == 'TIMER':
-            if not islands and not self._split_picking() and self._split_preview_dirty:
+            if self._split_merging():
+                if self._split_merge_dirty:
+                    self._split_update_merge_preview(force=True)
+                    self._split_refresh(context)
+            elif not islands and not self._split_picking() and self._split_preview_dirty:
                 self._split_update_preview(context, force=True)
                 self._split_refresh(context)
             return False
@@ -1565,9 +1917,10 @@ class SplitMixin:
                 hover = self._split_pick(context)
                 hover_changed = hover != self._split_hover
                 self._split_hover = hover
-                if islands or self._split_picking():
-                    # No cutting plane (Islands, Split PICK): the 3D cursor
-                    # stays, only the hover highlight follows the mouse.
+                if self._split_no_plane():
+                    # No cutting plane (Islands, Split PICK, MERGE): the 3D
+                    # cursor stays, only the hover highlight (and the merge
+                    # preview) follows the mouse.
                     if hover_changed:
                         self._split_refresh(context)
                 elif not self.split_frozen:
@@ -1586,7 +1939,7 @@ class SplitMixin:
                 self._split_refresh(context)
                 return True
             if event.alt and not event.ctrl:
-                if not islands and not self._split_picking() and self.split_pieces:
+                if not self._split_no_plane() and self.split_pieces:
                     ext = self.split_pieces[self.split_active].extent
                     step = ext * (0.002 if event.shift else 0.02)
                     self.split_offset += step if etype == 'WHEELUPMOUSE' else -step
@@ -1595,7 +1948,12 @@ class SplitMixin:
             return False
 
         if etype == 'LEFTMOUSE':
-            if press and islands:
+            if press and self._split_merging():
+                self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
+                if not event.ctrl:
+                    self._split_merge_click(context, set_base=False)
+                self._split_refresh(context)
+            elif press and islands:
                 self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
                 if not event.ctrl:
                     self._split_pick_or_merge(context, merge=event.shift)
@@ -1609,6 +1967,9 @@ class SplitMixin:
                     self._split_cut(context, 'FRONT')
                 elif event.ctrl:
                     self._split_cut(context, 'BACK')
+                elif event.shift:
+                    # Quick merge into the active piece, then pick (no cut).
+                    self._split_quick_merge(context, from_cut=True)
                 else:
                     self._split_cut_or_pick(context)
                 self._split_refresh(context)
@@ -1616,8 +1977,15 @@ class SplitMixin:
 
         if not press:
             # Releases of keys we own are swallowed; others (HUD etc.) fall through.
-            return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L', 'TAB', 'Q', 'W'}
+            return etype in ({'RIGHTMOUSE', 'ESC', 'K', 'R', 'F', 'X', 'Z', 'L', 'TAB', 'Q', 'W',
+                              'M'}
                              | _CONFIRM_KEYS | _BLOCKED_KEYS | set(_SLAB_KEYS))
+
+        if etype == 'M':
+            if not event.ctrl and not event.alt and not event.shift:
+                self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
+                self._split_toggle_merge(context, event)
+            return True
 
         if etype == 'Q':
             # Q: edit the existing collision under the mouse; Shift+Q: load
@@ -1654,6 +2022,9 @@ class SplitMixin:
             return True
 
         if etype == 'TAB':
+            if self._split_merging():
+                self._split_toggle_merge(context, event)
+                return True
             if islands:
                 return True
             if len(self.split_pieces) < 2:
@@ -1679,8 +2050,15 @@ class SplitMixin:
         if etype == 'RIGHTMOUSE':
             # Never finishes the modal in split mode: picks / merges a piece.
             self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
-            if self._split_picking():
+            if self._split_merging():
+                self._split_merge_click(context, set_base=True)
+                self._split_refresh(context)
+            elif self._split_picking():
                 self._split_pick_state_click(context, event, merge=event.shift)
+            elif event.shift and not islands:
+                # Split CUT: quick merge into the active piece, then pick.
+                self._split_quick_merge(context, from_cut=True)
+                self._split_refresh(context)
             else:
                 self._split_pick_or_merge(context, merge=event.shift)
             return True
@@ -1705,8 +2083,25 @@ class SplitMixin:
                     self.report({'INFO'}, f"Nothing to {label.lower()}")
             return True
 
-        if islands and (etype in {'R', 'F'} or etype in _SLAB_KEYS):
-            # Cutting tools: Split mode only.
+        if etype == 'F' and islands and not self._split_merging():
+            if not event.ctrl and not event.alt and not event.shift:
+                self._split_toggle_flat(context)
+                self._split_refresh(context)
+            return True
+
+        if (islands or self._split_merging()) and (etype in {'R', 'F'} or etype in _SLAB_KEYS):
+            # Cutting tools: Split mode's CUT / PICK only.
+            return True
+
+        if etype == 'X' and self._split_merging():
+            base = self._split_base_index()
+            if base is None:
+                self.report({'INFO'}, "Pick a merge base first (LMB)")
+                return True
+            self._split_set_active(base)
+            self._split_merge_base = None
+            self._split_delete(context)
+            self._split_refresh(context)
             return True
 
         if etype == 'R':
@@ -1724,6 +2119,8 @@ class SplitMixin:
             self.split_frozen = not self.split_frozen
             self._split_frozen_plane = (
                 self._split_base_plane(context) if self.split_frozen else None)
+            self._split_frozen_axis = (
+                self._split_live_plane_axis(context) if self.split_frozen else None)
             self.report({'INFO'}, "Split plane frozen" if self.split_frozen
                         else "Split plane follows the mouse")
             self._split_refresh(context)

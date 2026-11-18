@@ -196,6 +196,100 @@ def clip_outside_convex(polys: Sequence[Polygon], planes, eps: float) -> tuple[P
     return tuple(out)
 
 
+def section_polygon(flat_tris: Sequence[Sequence[float]], plane_co: Sequence[float],
+                    plane_no: Sequence[float], eps: float) -> list[Vec3]:
+    """Convex cross-section of a closed convex triangle soup by a plane.
+
+    *flat_tris* holds three points per triangle. Every triangle edge whose
+    ends lie on strictly opposite sides (beyond *eps*) contributes its
+    intersection point, every vertex within *eps* of the plane itself.
+    Points closer than *eps* (at least 1e-9) are merged, and points lying
+    on a straight side between their neighbours (from the diagonals of a
+    triangulated flat hull face) are dropped. Returns the points ordered
+    counter-clockwise around their centroid (seen from the side *plane_no*
+    points to), or [] when fewer than 3 distinct points remain or the normal
+    is zero.
+    """
+    no = _normalized(plane_no)
+    if no is None:
+        return []
+    merge = max(eps, 1e-9)
+    pts: list[Vec3] = []
+
+    def add(p):
+        for q in pts:
+            if abs(p[0] - q[0]) <= merge and abs(p[1] - q[1]) <= merge \
+                    and abs(p[2] - q[2]) <= merge:
+                return
+        pts.append((float(p[0]), float(p[1]), float(p[2])))
+
+    for i in range(0, len(flat_tris) - 2, 3):
+        tri = (flat_tris[i], flat_tris[i + 1], flat_tris[i + 2])
+        d = [_dot(_sub(p, plane_co), no) for p in tri]
+        for k in range(3):
+            if abs(d[k]) <= eps:
+                add(tri[k])
+        for k in range(3):
+            j = (k + 1) % 3
+            if (d[k] > eps and d[j] < -eps) or (d[k] < -eps and d[j] > eps):
+                t = d[k] / (d[k] - d[j])
+                a, b = tri[k], tri[j]
+                add((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t,
+                     a[2] + (b[2] - a[2]) * t))
+    if len(pts) < 3:
+        return []
+    n = float(len(pts))
+    c = (sum(p[0] for p in pts) / n, sum(p[1] for p in pts) / n, sum(p[2] for p in pts) / n)
+    # 2D basis of the plane: u from the world axis least parallel to no.
+    axis = min(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+               key=lambda a: abs(_dot(a, no)))
+    u = _normalized(_cross(no, axis))
+    v = _cross(no, u)
+    pts.sort(key=lambda p: math.atan2(_dot(_sub(p, c), v), _dot(_sub(p, c), u)))
+    # Drop points on straight sides (triangle diagonals of a flat hull face
+    # cut the plane mid-side).
+    changed = True
+    while changed and len(pts) > 3:
+        changed = False
+        for i in range(len(pts)):
+            a, p, b = pts[i - 1], pts[i], pts[(i + 1) % len(pts)]
+            ab = _sub(b, a)
+            length = _length(ab)
+            if length <= merge or _length(_cross(ab, _sub(p, a))) / length <= merge:
+                del pts[i]
+                changed = True
+                break
+    if len(pts) < 3:
+        return []
+    return pts
+
+
+def polygon_area(points: Sequence[Sequence[float]]) -> float:
+    """Area of a planar 3D polygon (half the Newell normal's length); 0 for
+    fewer than 3 points."""
+    if len(points) < 3:
+        return 0.0
+    ax = ay = az = 0.0
+    q = points[-1]
+    for p in points:
+        ax += (q[1] - p[1]) * (q[2] + p[2])
+        ay += (q[2] - p[2]) * (q[0] + p[0])
+        az += (q[0] - p[0]) * (q[1] + p[1])
+        q = p
+    return 0.5 * math.sqrt(ax * ax + ay * ay + az * az)
+
+
+def scale_polygon(points: Sequence[Sequence[float]], factor: float) -> list[Vec3]:
+    """*points* scaled by *factor* about their centroid ([] for none)."""
+    if not points:
+        return []
+    n = float(len(points))
+    c = (sum(p[0] for p in points) / n, sum(p[1] for p in points) / n,
+         sum(p[2] for p in points) / n)
+    return [(c[0] + (p[0] - c[0]) * factor, c[1] + (p[1] - c[1]) * factor,
+             c[2] + (p[2] - c[2]) * factor) for p in points]
+
+
 def closest_on_segment_2d(p, a, b) -> tuple[float, float]:
     """``(t, distance)`` of the point of segment *a*-*b* closest to *p*
     (2D); *t* in [0, 1] along the segment, 0 for a zero-length segment."""
@@ -485,8 +579,14 @@ def min_width(points: Sequence[Sequence[float]], normals: Sequence[Sequence[floa
     return 0.0 if best == math.inf else best
 
 
+# Flat-merge rule of plan_merges: a union up to this many times as thick as
+# the thickest ORIGINAL item of the two groups counts as flat.
+FLAT_FACTOR = 1.05
+
+
 def plan_merges(volumes: Sequence[float], boxes, max_gap: float, max_cost: float,
-                union_volume) -> list[list[int]]:
+                union_volume, union_thickness=None, thicknesses=None,
+                flat: bool = False) -> list[list[int]]:
     """Greedy agglomerative grouping of items ``0 .. n-1``.
 
     Each group has members, a volume and a bounding box (*volumes* /
@@ -498,15 +598,36 @@ def plan_merges(volumes: Sequence[float], boxes, max_gap: float, max_cost: float
     Pair costs are cached: only pairs with a newly merged group are computed.
     Ties are broken by group creation order, so the result is deterministic.
 
+    Flat rule (*flat* True and both *union_thickness* — a callable taking
+    the same frozenset, returning the union hull's thickness or None — and
+    *thicknesses* — one per item — given): a pair whose cost exceeds
+    *max_cost* is still eligible when the union is not meaningfully thicker
+    than the thickest original item of either group, ``union <=
+    max(base_a, base_b) * FLAT_FACTOR + 1e-6`` (coplanar plates merge into a
+    slab whatever the void). A group's base thickness is the max of its
+    original items' *thicknesses* and never grows through merging, so the
+    limit cannot drift upward step by step. Eligible pairs are still merged
+    lowest cost first.
+    Without these arguments the result is exactly the classic one.
+
     Returns the groups as sorted index lists, ordered by smallest member.
     """
     import heapq
 
+    use_flat = bool(flat) and union_thickness is not None and thicknesses is not None
     n = len(volumes)
     members: dict = {i: frozenset((i,)) for i in range(n)}
     vol: dict = {i: float(volumes[i]) for i in range(n)}
     box: dict = {i: boxes[i] for i in range(n)}
+    # Max thickness of each group's ORIGINAL items (flat rule only).
+    base_thick: dict = ({i: float(thicknesses[i]) for i in range(n)} if use_flat else {})
     heap: list = []
+
+    def flat_ok(a, b, union):
+        tu = union_thickness(union)
+        if tu is None:
+            return False
+        return tu <= max(base_thick[a], base_thick[b]) * FLAT_FACTOR + 1e-6
 
     def pair(a, b):
         if bbox_gap(box[a], box[b]) > max_gap:
@@ -516,6 +637,10 @@ def plan_merges(volumes: Sequence[float], boxes, max_gap: float, max_cost: float
         if vu is None or not vu > 0.0:
             return
         cost = max(0.0, vu - vol[a] - vol[b]) / vu
+        # Pairs over max_cost can never merge (classic rule) unless flat:
+        # leaving them out is the same as stopping at the first of them.
+        if cost > max_cost and not (use_flat and flat_ok(a, b, union)):
+            return
         heapq.heappush(heap, (cost, a, b, vu))
 
     for a in range(n):
@@ -527,14 +652,14 @@ def plan_merges(volumes: Sequence[float], boxes, max_gap: float, max_cost: float
         cost, a, b, vu = heapq.heappop(heap)
         if a not in members or b not in members:
             continue        # stale: one side was merged already
-        if cost > max_cost:
-            break
         g = next_id
         next_id += 1
         members[g] = members.pop(a) | members.pop(b)
         vol[g] = vu
         box[g] = bbox_union(box.pop(a), box.pop(b))
         del vol[a], vol[b]
+        if use_flat:
+            base_thick[g] = max(base_thick.pop(a), base_thick.pop(b))
         for other in sorted(members):
             if other != g:
                 pair(other, g)

@@ -562,6 +562,57 @@ def _split_edge_colors(item, view, back_factor):
     return colors
 
 
+def _split_solid_fill_colors(item, view):
+    """Per-vertex RGBA for the Merge state's opaque fill: the piece colour
+    times ``0.55 + 0.45 * facing`` (facing clamped to 0..1), alpha 1."""
+    r, g, b = item['rgb']
+    normals = item['normals']
+    centers = item['centers']
+    count = len(item['tris']) // 3
+    if view is None or len(normals) != count or len(centers) != count:
+        return [(r * 0.8, g * 0.8, b * 0.8, 1.0)] * (count * 3)
+    _sig, persp, vec = view
+    colors = []
+    for k in range(count):
+        n = normals[k]
+        if persp:
+            d = vec - centers[k]
+            length = d.length
+            facing = n.dot(d) / length if length > 1e-12 else 0.0
+        else:
+            facing = n.dot(vec)
+        s = 0.55 + 0.45 * min(1.0, max(0.0, facing))
+        col = (r * s, g * s, b * s, 1.0)
+        colors.extend((col, col, col))
+    return colors
+
+
+def _draw_split_solid(gpu_manager, smooth, pieces, view, view_id):
+    """Merge state: every piece opaque. Fills first with depth test and depth
+    write (pieces occlude each other), then depth-tested edges in one flat
+    colour per piece (no back-face fade). The caller restores GPU state."""
+    sigs = [('solid', view[0] if view else None, item['role'], item['rgb'], item['edge'])
+            for item in pieces]
+    gpu.state.depth_test_set('LESS_EQUAL')
+    gpu.state.depth_mask_set(True)
+    smooth.bind()
+    for item, sig in zip(pieces, sigs):
+        batch = _split_color_batch(
+            gpu_manager, smooth, f"split_fill_{item['key']}_{view_id}", 'TRIS',
+            item['tris'], sig, lambda item=item: _split_solid_fill_colors(item, view))
+        if batch:
+            batch.draw(smooth)
+    gpu.state.depth_mask_set(False)
+    for item, sig in zip(pieces, sigs):
+        count = len(item['edges'])
+        batch = _split_color_batch(
+            gpu_manager, smooth, f"split_edges_{item['key']}_{view_id}", 'LINES',
+            item['edges'], sig, lambda item=item, count=count: [item['edge']] * count)
+        if batch:
+            gpu.state.line_width_set(item['edge_width'])
+            batch.draw(smooth)
+
+
 def _split_look_sig(item, view, back_edges, back_faces):
     """What a piece's fill / edge colours depend on."""
     return (view[0] if view else None, item['role'], item['rgb'], item['fill_alpha'],
@@ -624,7 +675,7 @@ def _draw_split_snap(shader, snap):
 def draw_split_overlay(gpu_manager, split_overlay):
     """Draw split-mode pieces and the cutting plane (POST_VIEW).
 
-    ``split_overlay`` is ``{'pieces': [item], 'plane': {'tris', 'border'} or
+    ``split_overlay`` is ``{'pieces': [item], 'plane': {'polygon'} or
     None, 'backface_edges', 'backface_faces'}`` or None, items from
     ``functions.split.overlay_geometry``. Fills are drawn without depth test
     so pieces stay visible through the source mesh; their alpha fades with
@@ -670,6 +721,10 @@ def draw_split_overlay(gpu_manager, split_overlay):
     gpu.state.depth_mask_set(False)
     gpu.state.face_culling_set('NONE')
     try:
+        if split_overlay.get('solid'):
+            # Merge state: opaque pieces (the finally below restores state).
+            _draw_split_solid(gpu_manager, smooth, pieces, view, view_id)
+            return
         # Soft translucent fills, visible through the mesh.
         gpu.state.depth_test_set('NONE')
         smooth.bind()
@@ -682,10 +737,17 @@ def draw_split_overlay(gpu_manager, split_overlay):
             if batch:
                 batch.draw(smooth)
 
-        if plane:
+        plane_poly = [tuple(p) for p in (plane.get('polygon') or ())] if plane else []
+        if len(plane_poly) < 3:
+            plane_poly = []
+        if plane_poly:
+            # N-gon fan; rebuilt every draw (a handful of points).
+            plane_tris = []
+            for i in range(1, len(plane_poly) - 1):
+                plane_tris.extend((plane_poly[0], plane_poly[i], plane_poly[i + 1]))
             shader.bind()
             shader.uniform_float("color", (0.55, 0.8, 1.0, 0.06))
-            batch_for_shader(shader, 'TRIS', {"pos": plane['tris']}).draw(shader)
+            batch_for_shader(shader, 'TRIS', {"pos": plane_tris}).draw(shader)
 
         # Edges: inactive pieces respect depth; hovered, active and preview
         # outlines are always visible. Back edges are dimmed in both passes.
@@ -703,12 +765,17 @@ def draw_split_overlay(gpu_manager, split_overlay):
                     gpu.state.line_width_set(item['edge_width'])
                     batch.draw(smooth)
 
-        if plane:
+        if plane_poly:
             gpu.state.depth_test_set('NONE')
             gpu.state.line_width_set(1.0)
             shader.bind()
             shader.uniform_float("color", (0.55, 0.8, 1.0, 0.35))
-            batch_for_shader(shader, 'LINES', {"pos": plane['border']}).draw(shader)
+            # Closed outline as LINES pairs (LINE_LOOP is deprecated).
+            border = []
+            for i in range(len(plane_poly)):
+                border.append(plane_poly[i])
+                border.append(plane_poly[(i + 1) % len(plane_poly)])
+            batch_for_shader(shader, 'LINES', {"pos": border}).draw(shader)
 
         snap = split_overlay.get('snap')
         if snap:

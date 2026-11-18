@@ -319,6 +319,23 @@ def hull_planes(points, tol):
     return planes
 
 
+def hull_volume_thickness(points):
+    """``(volume, thickness)`` of the convex hull of *points* from one hull
+    build (thickness = ``min_width`` over the hull's triangle normals);
+    ``(0.0, 0.0)`` when they are flat or the hull fails."""
+    if not hs.is_solid(points, _points_eps(points)):
+        return 0.0, 0.0
+    try:
+        data = _hull_data(points, wire=False)
+    except Exception as e:
+        print(f"Split: failed to build a union hull: {e}")
+        return 0.0, 0.0
+    if data is None:
+        return 0.0, 0.0
+    hull_verts, _faces, tris, tri_normals = data[0], data[1], data[2], data[3]
+    return hs.tris_volume(tris), hs.min_width(hull_verts, tri_normals)
+
+
 def piece_thickness(piece):
     """Smallest extent of the piece's hull along its own face normals."""
     return hs.min_width(piece.hull_verts, piece.tri_normals)
@@ -339,8 +356,8 @@ class IslandSet:
     """The islands of one explode, for live re-grouping.
 
     Holds the island polygon tuples, a Piece per island (None for a flat
-    island) built once, and a cache ``{frozenset(island indices): volume}``
-    of union-hull volumes shared by every re-grouping.
+    island) built once, and a cache ``{frozenset(island indices): (volume,
+    thickness)}`` of union hulls shared by every re-grouping.
     """
 
     def __init__(self, islands):
@@ -367,23 +384,35 @@ class IslandSet:
     def too_many(self):
         return len(self.islands) > MAX_AUTO_MERGE_ISLANDS
 
-    def union_volume(self, indices):
-        """Volume of the convex hull of the islands *indices* (cached)."""
+    def _union(self, indices):
+        """``(volume, thickness)`` of the convex hull of the islands
+        *indices*, from one hull build (cached per frozenset)."""
         key = frozenset(indices)
-        vol = self._cache.get(key)
-        if vol is None:
+        hit = self._cache.get(key)
+        if hit is None:
             pts = []
             for i in sorted(key):
                 pts.extend(self.points[i])
-            vol = hull_volume(pts)
-            self._cache[key] = vol
-        return vol
+            hit = hull_volume_thickness(pts)
+            self._cache[key] = hit
+        return hit
 
-    def groups(self, max_gap, max_cost, min_thickness):
+    def union_volume(self, indices):
+        """Volume of the convex hull of the islands *indices* (cached)."""
+        return self._union(indices)[0]
+
+    def union_thickness(self, indices):
+        """Thickness (``min_width``) of the convex hull of the islands
+        *indices* (cached; 0.0 for a flat union)."""
+        return self._union(indices)[1]
+
+    def groups(self, max_gap, max_cost, min_thickness, flat=False):
         """``(groups, ignored_count)``: lists of island indices, one per hull.
 
         Islands thinner than *min_thickness* (when > 0) are ignored; flat
-        islands take part with volume 0 and are ignored if left alone. Over
+        islands take part with volume 0 (thickness 0) and are ignored if
+        left alone. *flat* enables the flat-merge rule of ``plan_merges``
+        (coplanar parts merge whatever the void). Over
         MAX_AUTO_MERGE_ISLANDS islands nothing is merged: every solid island
         is its own group.
         """
@@ -400,8 +429,15 @@ class IslandSet:
         def union_volume(local):
             return self.union_volume(kept[j] for j in local)
 
+        def union_thickness(local):
+            return self.union_thickness(kept[j] for j in local)
+
+        thicknesses = [self.thickness[i] for i in kept]
+        plan = hs.plan_merges(volumes, boxes, max_gap, max_cost, union_volume,
+                              union_thickness=union_thickness, thicknesses=thicknesses,
+                              flat=flat)
         out = []
-        for local in hs.plan_merges(volumes, boxes, max_gap, max_cost, union_volume):
+        for local in plan:
             group = [kept[j] for j in local]
             if len(group) == 1 and self.pieces[group[0]] is None:
                 ignored += 1
@@ -498,9 +534,25 @@ _ROLE_STYLE = {
     'PICK': (0.187, 0.315, False, 1.0, False),
     'FRESH': (0.187, 0.50, True, 1.5, True),
     'PICK_HOVER': (0.323, 0.65, True, 1.5, True),
+    # Merge state's base piece (the other merge roles reuse PICK /
+    # PICK_HOVER / PREVIEW).
+    'MERGE_BASE': (0.187, 0.50, True, 1.5, True),
 }
 _ROLE_ORDER = {'INACTIVE': 0, 'HOVER': 1, 'ACTIVE': 2, 'PREVIEW': 2,
-               'PICK': 0, 'FRESH': 1, 'PICK_HOVER': 2}
+               'PICK': 0, 'FRESH': 1, 'PICK_HOVER': 2, 'MERGE_BASE': 1}
+
+# Merge state draws the pieces solid (see ui.draw._draw_split_solid):
+# role -> (edge is white, edge width). Non-white edges are the piece colour
+# darkened by _SOLID_EDGE_DARKEN; the merge-preview hull is tinted towards
+# white by _SOLID_PREVIEW_TINT.
+_SOLID_EDGE = {
+    'MERGE_BASE': (True, 1.5),
+    'PREVIEW': (True, 1.5),
+    'PICK_HOVER': (True, 1.25),
+    'PICK': (False, 1.0),
+}
+_SOLID_EDGE_DARKEN = 0.5
+_SOLID_PREVIEW_TINT = 0.55
 
 # Back-face dimming defaults (addon preferences split_backface_edges /
 # split_backface_faces).
@@ -553,28 +605,117 @@ def _overlay_item(piece, role):
     }
 
 
-def overlay_geometry(pieces, active, hover, plane, preview=None, pick=False, fresh=()):
+def _solid_item(piece, role):
+    """Overlay item for the Merge state's opaque drawing: fill alpha 1.0,
+    the merge preview tinted towards white, edges white (base / preview /
+    hovered) or the darkened piece colour, all opaque."""
+    item = _overlay_item(piece, role)
+    r, g, b = item['rgb']
+    if role == 'PREVIEW':
+        t = _SOLID_PREVIEW_TINT
+        r, g, b = r + (1.0 - r) * t, g + (1.0 - g) * t, b + (1.0 - b) * t
+    white, width = _SOLID_EDGE.get(role, (False, 1.0))
+    if white:
+        edge = (1.0, 1.0, 1.0, 1.0)
+    else:
+        k = _SOLID_EDGE_DARKEN
+        edge = (r * k, g * k, b * k, 1.0)
+    item.update(rgb=(r, g, b), fill_alpha=1.0, edge=edge, edge_width=width,
+                edge_on_top=False)
+    return item
+
+
+# The cutting-plane preview is the active piece's section grown by this.
+_PLANE_SECTION_SCALE = 1.12
+# Fallback square (plane misses the active piece): half-size / piece radius.
+_PLANE_FALLBACK_HALF = 0.25
+
+
+def plane_polygon(piece, plane_co, plane_no, plane_axis=None):
+    """World-space polygon (list of Vectors) showing the cutting plane: the
+    section of *piece*'s hull scaled by ``_PLANE_SECTION_SCALE``, or, when
+    the plane misses the hull or only grazes it (section area below 1e-6 x
+    extent squared), a small square on the plane origin. The square's first
+    side runs along *plane_axis* (a world vector, e.g. the hovered edge)
+    projected onto the plane; without a usable hint along the world axis
+    least parallel to the normal. [] for a zero normal."""
+    co = Vector(plane_co)
+    no = Vector(plane_no)
+    if no.length_squared < 1e-20:
+        return []
+    no.normalize()
+    eps = max(1e-6 * piece.extent, 1e-9)
+    section = hs.section_polygon(piece.hull_tris, tuple(co), tuple(no), eps)
+    if section and hs.polygon_area(section) >= 1e-6 * piece.extent * piece.extent:
+        return [Vector(p) for p in hs.scale_polygon(section, _PLANE_SECTION_SCALE)]
+    u = None
+    if plane_axis is not None:
+        try:
+            hint = Vector(plane_axis)
+            hint = hint - no * hint.dot(no)
+            if hint.length_squared > 1e-12 * max(1.0, Vector(plane_axis).length_squared):
+                u = hint
+        except Exception:
+            u = None
+    if u is None:
+        axes = (Vector((1.0, 0.0, 0.0)), Vector((0.0, 1.0, 0.0)), Vector((0.0, 0.0, 1.0)))
+        axis = min(axes, key=lambda a: abs(a.dot(no)))
+        u = axis - no * axis.dot(no)
+    if u.length_squared < 1e-20:
+        return []
+    half = max(piece.radius, 1e-4) * _PLANE_FALLBACK_HALF
+    u = u.normalized() * half
+    v = no.cross(u).normalized() * half
+    return [co - u - v, co + u - v, co + u + v, co - u + v]
+
+
+def overlay_geometry(pieces, active, hover, plane, preview=None, pick=False, fresh=(),
+                     pick_base=None, merge=False, base=None, merge_preview=None, plane_axis=None):
     """Data for ``draw_split_overlay``.
 
     *plane* is ``(origin, normal)`` or None. *preview* is ``(front, back)``,
     the pieces a cut of the active piece would produce, or None; when given
     they are drawn instead of the active piece. The hovered piece (when not
-    the active one) is highlighted. The plane is a quad centred on the
-    projection of the active piece's centre onto the plane.
+    the active one) is highlighted. The plane is drawn as ``plane_polygon``
+    of the ACTIVE piece (the section is the same during a cut preview):
+    ``{'polygon': [points]}``; *plane_axis* orients its fallback square.
 
     *pick* (Split mode's piece-selection state) draws every piece evenly,
     the hovered one strongest, the pieces whose uid is in *fresh* outlined,
-    and no active emphasis, plane or preview.
+    and no active emphasis, plane or preview; the piece at index
+    *pick_base* (the Shift+click merge target) gets the MERGE_BASE outline.
+
+    *merge* (the Merge state) draws the pieces SOLID (``'solid': True`` in
+    the result): the piece at index *base* as MERGE_BASE, the hovered one
+    as PICK_HOVER, the others as PICK; when *merge_preview* (the hull the
+    merge of the hovered piece into the base would give) is set, it is drawn
+    as PREVIEW instead of those two pieces. No plane, no cut preview.
 
     The back-face dimming factors from the addon preferences ride along as
     ``'backface_edges'`` / ``'backface_faces'``.
     """
     items = []
-    if pick:
+    if merge:
+        for i, piece in enumerate(pieces):
+            if merge_preview is not None and (i == base or i == hover):
+                continue
+            if i == base:
+                role = 'MERGE_BASE'
+            elif i == hover:
+                role = 'PICK_HOVER'
+            else:
+                role = 'PICK'
+            items.append(_solid_item(piece, role))
+        if merge_preview is not None:
+            items.append(_solid_item(merge_preview, 'PREVIEW'))
+        plane, preview = None, None
+    elif pick:
         fresh = set(fresh or ())
         for i, piece in enumerate(pieces):
             if i == hover:
                 role = 'PICK_HOVER'
+            elif i == pick_base:
+                role = 'MERGE_BASE'
             elif piece.uid in fresh:
                 role = 'FRESH'
             else:
@@ -600,19 +741,9 @@ def overlay_geometry(pieces, active, hover, plane, preview=None, pick=False, fre
     back_edges, back_faces = backface_factors()
     plane_data = None
     if plane is not None and pieces and active is not None and 0 <= active < len(pieces):
-        co = Vector(plane[0])
-        no = Vector(plane[1])
-        if no.length_squared > 1e-20:
-            no.normalize()
-            piece = pieces[active]
-            c = piece.center - no * (piece.center - co).dot(no)
-            half = max(piece.radius, 1e-4) * 1.2
-            u = no.orthogonal().normalized() * half
-            v = no.cross(u).normalized() * half
-            a, b, cc, d = c - u - v, c + u - v, c + u + v, c - u + v
-            plane_data = {
-                'tris': [a, b, cc, a, cc, d],
-                'border': [a, b, b, cc, cc, d, d, a],
-            }
+        polygon = plane_polygon(pieces[active], plane[0], plane[1], plane_axis)
+        if polygon:
+            plane_data = {'polygon': polygon}
     return {'pieces': items, 'plane': plane_data,
-            'backface_edges': back_edges, 'backface_faces': back_faces}
+            'backface_edges': back_edges, 'backface_faces': back_faces,
+            'solid': bool(merge)}
