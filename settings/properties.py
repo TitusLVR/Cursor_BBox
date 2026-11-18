@@ -11,6 +11,7 @@ from bpy.props import (
 SPLIT_PARAM_DEFAULTS = {
     'split_tight': ('cursor_bbox_split_fit', 'AUTO'),
     'split_snap_on': ('cursor_bbox_split_snap', False),
+    'split_cut_all': ('cursor_bbox_split_cut_all', False),
     'split_axis': ('cursor_bbox_split_axis', 0),
     'split_merge_gap': ('cursor_bbox_split_merge_gap', 0.01),
     'split_merge_cost': ('cursor_bbox_split_merge_cost', 0.25),
@@ -475,6 +476,12 @@ def register():
         name="Snap to Edges / Vertices",
         description="Split mode: the cutting plane snaps to hovered edges and vertices",
         default=split_default('split_snap_on'),
+    )
+
+    bpy.types.Scene.cursor_bbox_split_cut_all = bpy.props.BoolProperty(
+        name="Cut Through All Pieces",
+        description="Split mode: a cut divides every piece the plane crosses, not only the active one",
+        default=split_default('split_cut_all'),
     )
 
     bpy.types.Scene.cursor_bbox_split_axis = bpy.props.IntProperty(

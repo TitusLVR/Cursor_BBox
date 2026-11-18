@@ -309,6 +309,7 @@ class CursorBBox_PT_main(bpy.types.Panel):
             sub.prop(scene, 'cursor_bbox_split_fit', text="Cut Fit")
             sub.prop(scene, 'cursor_bbox_split_axis', text="Plane Axis")
             sub.prop(scene, 'cursor_bbox_split_snap', text="Snap to Edges / Vertices", toggle=True)
+            sub.prop(scene, 'cursor_bbox_split_cut_all', text="Cut Through All Pieces", toggle=True)
             sub.separator()
             sub.prop(scene, 'cursor_bbox_split_merge_gap', text="Merge Gap")
             sub.prop(scene, 'cursor_bbox_split_merge_cost', text="Merge Void", slider=True)

@@ -113,6 +113,7 @@ SPLIT_HELP_ITEMS = [
     HUDItem("Hover a face: cut by its plane (edge / vertex: with S on, along the "
             "edge / through the vertex)", "Mouse"),
     HUDItem("Snap to edges / vertices", "S"),
+    HUDItem("Cut through all pieces / only the active one", "A"),
     HUDItem("Cut fit: auto / tight (hug geometry) / clean (just divide)", "T"),
     HUDItem("Fit active piece to geometry", "G"),
     HUDItem("Plane: face / across X / across Y", "R"),
@@ -296,6 +297,9 @@ class SplitMixin:
         # Split CUT: snap the cutting plane to hovered edges / vertices (S);
         # off: always the hovered face's plane.
         self.split_snap_on = split_default('split_snap_on')
+        # Split CUT: a click cuts every piece the plane crosses (A toggles);
+        # off: only the active piece.
+        self.split_cut_all = split_default('split_cut_all')
         # How a cut rebuilds the two sides (T cycles):
         #   'TIGHT' - each side's hull is rebuilt from the geometry on that
         #             side, so empty volume is cut away;
@@ -632,6 +636,10 @@ class SplitMixin:
                      + ("" if getattr(self, 'split_snap_on', False) else " (snap off)")),
             visible_getter=lambda: (visible_split() and not self._split_picking()
                                     and not self._split_merging())))
+        hud.add_param(HUDParam(
+            "Cut",
+            lambda: "all pieces" if getattr(self, 'split_cut_all', False) else "active piece",
+            visible_getter=visible_split))
         hud.add_param(HUDParam(
             "Merge base", lambda: "set" if self._split_base_index() is not None else "-",
             visible_getter=lambda: visible() and self._split_merging()))
@@ -1131,6 +1139,48 @@ class SplitMixin:
         self._split_after_change(context)
         return True
 
+    def _split_cut_all(self, context):
+        """LMB with "cut all" on (A): cut EVERY piece the plane splits.
+
+        Each piece is cut with its own fit (see _split_use_tight); pieces the
+        plane misses stay as they are. One undo step for the whole cut."""
+        plane = self._split_plane(context)
+        if plane is None or not self.split_pieces:
+            return
+        snap = self._split_snapshot()
+        pieces, fresh, cut = [], set(), 0
+        new_active = 0
+        for i, piece in enumerate(self.split_pieces):
+            try:
+                front, back = cut_piece(piece, plane[0], plane[1], self._split_color_counter,
+                                        tight=self._split_use_tight(piece))
+            except Exception as e:
+                print(f"Split: cut failed: {e}")
+                front, back = None, None
+            if i == self.split_active:
+                new_active = len(pieces)
+            if front is None or back is None:
+                pieces.append(piece)
+                continue
+            # The back piece was built with the next colour (see cut_piece).
+            self._split_next_color()
+            pieces.extend((front, back))
+            fresh.update((front.uid, back.uid))
+            cut += 1
+        if not cut:
+            self.report({'WARNING'}, "Plane does not split any piece")
+            return
+        self._split_undo.push(snap)
+        self._split_end_auto()
+        self._split_pristine = False
+        self.split_pieces = pieces
+        self._split_set_active(new_active)
+        self._split_set_state(context, 'PICK')
+        self._split_fresh = fresh
+        self.report({'INFO'}, f"Cut {cut} piece(s): {len(pieces)} pieces. "
+                              "Pick the piece to cut next")
+        self._split_after_change(context)
+
     def _split_use_tight(self, piece):
         """Whether a cut of *piece* rebuilds the sides from geometry."""
         mode = self.split_tight
@@ -1148,7 +1198,9 @@ class SplitMixin:
         "the tool cuts pieces I did not select": the next click then cut that
         other piece. Changing the piece is explicit: RMB, TAB or the PICK state.
         """
-        if not self._split_cut(context, 'BOTH'):
+        if getattr(self, 'split_cut_all', False):
+            self._split_cut_all(context)
+        elif not self._split_cut(context, 'BOTH'):
             self.report({'WARNING'}, "Plane does not split the active piece "
                                      "(RMB / TAB to choose another piece)")
 
@@ -2219,6 +2271,16 @@ class SplitMixin:
             if not event.ctrl and not event.alt and not event.shift:
                 self._split_mouse = (event.mouse_region_x, event.mouse_region_y)
                 self._split_fit(context)
+                self._split_refresh(context)
+            return True
+
+        if etype == 'A' and not islands:
+            # Split kind: a click cuts all pieces / the active one (Islands: blocked).
+            if not event.ctrl and not event.alt and not event.shift:
+                self.split_cut_all = not self.split_cut_all
+                self._split_store_params(context)
+                self.report({'INFO'}, "Cut through all pieces: "
+                                      + ("ON" if self.split_cut_all else "OFF"))
                 self._split_refresh(context)
             return True
 
