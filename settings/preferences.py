@@ -158,8 +158,8 @@ class CursorBBoxPreferences(AddonPreferences):
         default=False
     )
     show_split_overlay: BoolProperty(
-        name="Split / Islands Overlay",
-        description="Show the Split / Islands overlay drawing settings",
+        name="Split / Islands",
+        description="Show the Split / Islands behaviour and overlay drawing settings",
         default=False
     )
 
@@ -186,6 +186,15 @@ class CursorBBoxPreferences(AddonPreferences):
         default=0.12,
         min=0.0,
         max=1.0
+    )
+
+    split_autoload_existing: BoolProperty(
+        name="Load Existing Collisions",
+        description=(
+            "When entering Split / Islands mode, start from the hulls and boxes that "
+            "already exist for the selection instead of one hull of everything"
+        ),
+        default=True
     )
 
     # BBox preview settings - Updated to #FFFFFF
@@ -440,9 +449,10 @@ class CursorBBoxPreferences(AddonPreferences):
                     body.prop(self, "bbox_show_all_edges")
 
                 body = _pref_rollout(grp, self, "show_split_overlay",
-                                     "Split / Islands overlay",
+                                     "Split / Islands",
                                      icon='MOD_EXPLODE', split=True)
                 if body is not None:
+                    body.prop(self, "split_autoload_existing")
                     body.prop(self, "split_backface_edges")
                     body.prop(self, "split_backface_faces")
 

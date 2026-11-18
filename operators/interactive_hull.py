@@ -630,7 +630,9 @@ class CursorBBox_OT_interactive_hull(SplitMixin, BrushMarkingMixin, bpy.types.Op
             HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
             HUDItem("Confirm", "RMB"),
             HUDItem("Cancel", "ESC"),
-        ]))
+        ], visible_getter=lambda: (not getattr(self, 'point_mode', False)
+                                   and not getattr(self, 'thickness_mode', False)
+                                   and not getattr(self, 'split_mode', False))))
         self.hud_ctl.help.add_section(HUDSection("Point Mode", [
             HUDItem("Add point", "LMB"),
             HUDItem("Snap on/off", "S"),
@@ -640,16 +642,23 @@ class CursorBBox_OT_interactive_hull(SplitMixin, BrushMarkingMixin, bpy.types.Op
             HUDItem("Snap threshold", "Ctrl+Wheel"),
             HUDItem("Toggle limit plane", "C"),
             HUDItem("Exit point mode", "A"),
-        ]))
+        ], visible_getter=lambda: getattr(self, 'point_mode', False)))
         self.hud_ctl.help.add_section(HUDSection("Thickness Mode", [
             HUDItem("Place cursor", "LMB"),
             HUDItem("Adjust thickness", "Alt+Wheel"),
             HUDItem("From cursor on/off", "C"),
             HUDItem("Reset to 0", "R"),
             HUDItem("Exit thickness mode", "T"),
-        ]))
-        self.hud_ctl.help.add_section(HUDSection("Split Mode", SPLIT_HELP_ITEMS))
-        self.hud_ctl.help.add_section(HUDSection("Islands Mode", ISLANDS_HELP_ITEMS))
+        ], visible_getter=lambda: (getattr(self, 'thickness_mode', False)
+                                   and not getattr(self, 'point_mode', False))))
+        self.hud_ctl.help.add_section(HUDSection(
+            "Split Mode", SPLIT_HELP_ITEMS,
+            visible_getter=lambda: (getattr(self, 'split_mode', False)
+                                    and getattr(self, 'split_kind', 'SPLIT') == 'SPLIT')))
+        self.hud_ctl.help.add_section(HUDSection(
+            "Islands Mode", ISLANDS_HELP_ITEMS,
+            visible_getter=lambda: (getattr(self, 'split_mode', False)
+                                    and getattr(self, 'split_kind', 'SPLIT') == 'ISLANDS')))
         from ..functions.utils import CURSOR_PLANE_ALIGNMENTS as _PLANES
         _mode_names = ("All", "Vert", "Edge", "Face")
 

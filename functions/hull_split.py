@@ -150,6 +150,27 @@ def split_polygons(polys: Sequence[Polygon], plane_co: Sequence[float],
     return tuple(front), tuple(back)
 
 
+def clip_to_convex(polys: Sequence[Polygon], planes, eps: float) -> tuple[Polygon, ...]:
+    """Clip every polygon to the convex region bounded by *planes*.
+
+    *planes* is an iterable of ``(point, outward_normal)``; the region is the
+    intersection of their back half-spaces (signed distance ``<= eps``).
+    Polygons left with fewer than 3 points are dropped; a polygon lying
+    entirely inside is returned as the same object.
+    """
+    planes = tuple(planes)
+    out: list[Polygon] = []
+    for poly in polys:
+        cur = poly
+        for co, no in planes:
+            cur = clip_polygon(cur, co, no, eps)[1]
+            if cur is None:
+                break
+        if cur is not None:
+            out.append(cur)
+    return tuple(out)
+
+
 def unique_points(polys: Sequence[Polygon], digits: int = 6) -> list[Vec3]:
     """Deduplicated points of *polys* (rounded to *digits* for the comparison).
 

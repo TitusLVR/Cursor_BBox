@@ -24,8 +24,22 @@ class HUDItem:
 
 @dataclass
 class HUDSection:
+    """One titled block of the Help overlay.
+
+    `visible_getter` (optional) hides the whole section when it returns
+    False — use it to show only the keys of the mode the operator is in.
+    """
     title: str
     items: list[HUDItem] = field(default_factory=list)
+    visible_getter: Callable[[], bool] | None = None
+
+    def is_visible(self) -> bool:
+        if self.visible_getter is None:
+            return True
+        try:
+            return bool(self.visible_getter())
+        except Exception:
+            return True
 
 
 # Parameter kinds for HUDParam — drive value formatting.

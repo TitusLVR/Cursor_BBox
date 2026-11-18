@@ -41,7 +41,7 @@ class Piece:
                  'color_index', 'center', 'radius', 'extent', 'uid', 'volume')
 
     def __init__(self, polys, hull_verts, hull_tris, hull_edges, bvh, color_index,
-                 tri_normals=(), tri_centers=(), volume=0.0, edge_normals=()):
+                 tri_normals=(), tri_centers=(), volume=0.0, edge_normals=(), uid=None):
         self.polys = polys
         self.hull_verts = hull_verts      # list of world-space Vectors
         self.hull_tris = hull_tris        # flat vertex list for 'TRIS', outward winding
@@ -64,7 +64,9 @@ class Piece:
         self.radius = max(((v - center).length for v in hull_verts), default=0.0)
         self.extent = hs.extent(polys)
         self.volume = volume              # volume of the hull
-        self.uid = _next_uid()
+        # A given uid means "the same piece rebuilt" (undo / redo): identical
+        # geometry, so caches keyed by uid stay valid.
+        self.uid = _next_uid() if uid is None else uid
 
 
 def _points_eps(points):
@@ -158,8 +160,11 @@ def _hull_data(points):
     return hull_verts, faces, tris, tri_normals, tri_centers, edges, edge_normals
 
 
-def make_piece(polys, color_index):
-    """Build a Piece from *polys*, or None when they do not enclose a volume."""
+def make_piece(polys, color_index, uid=None):
+    """Build a Piece from *polys*, or None when they do not enclose a volume.
+
+    *uid* (optional) reuses the uid of the piece these polygons came from
+    unchanged (undo / redo); otherwise the piece gets a new one."""
     polys = tuple(polys)
     if not polys:
         return None
@@ -176,7 +181,7 @@ def make_piece(polys, color_index):
         print(f"Split: failed to build piece hull: {e}")
         return None
     return Piece(polys, hull_verts, tris, edges, bvh, color_index, tri_normals, tri_centers,
-                 hs.tris_volume(tris), edge_normals)
+                 hs.tris_volume(tris), edge_normals, uid)
 
 
 def hull_volume(points):
@@ -192,6 +197,44 @@ def hull_volume(points):
     if data is None:
         return 0.0
     return hs.tris_volume(data[2])
+
+
+def hull_planes(points, tol):
+    """Bounding planes ``(point, outward unit normal)`` of the convex hull of
+    *points* (same bmesh path as make_piece), each pushed OUTWARD by *tol*.
+
+    Duplicate planes (normal within 1e-4 and distance within *tol*) are
+    dropped. Empty when the points are flat or the hull fails.
+    """
+    if not hs.is_solid(points, _points_eps(points)):
+        return []
+    try:
+        data = _hull_data(points)
+    except Exception as e:
+        print(f"Split: failed to build a region hull: {e}")
+        return []
+    if data is None:
+        return []
+    _verts, _faces, _tris, tri_normals, tri_centers, _edges, _edge_normals = data
+    planes = []
+    seen = []   # (normal tuple, distance) of the planes kept
+    for n, c in zip(tri_normals, tri_centers):
+        if n.length_squared < 0.5:
+            continue    # degenerate triangle (zero normal)
+        no = (n.x, n.y, n.z)
+        d = n.dot(c)
+        duplicate = False
+        for sno, sd in seen:
+            if (abs(no[0] - sno[0]) <= 1e-4 and abs(no[1] - sno[1]) <= 1e-4
+                    and abs(no[2] - sno[2]) <= 1e-4 and abs(d - sd) <= tol):
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        seen.append((no, d))
+        co = c + n * tol
+        planes.append(((co.x, co.y, co.z), no))
+    return planes
 
 
 def piece_thickness(piece):

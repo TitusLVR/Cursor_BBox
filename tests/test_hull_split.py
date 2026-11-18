@@ -394,5 +394,44 @@ class PlanMergesTests(unittest.TestCase):
                                         lambda m: 1.0), [[0]])
 
 
+class ClipToConvexTests(unittest.TestCase):
+    # Unit cube [0, 1]^3 as (point, outward normal) planes.
+    CUBE = (((1.0, 0.5, 0.5), (1.0, 0.0, 0.0)), ((0.0, 0.5, 0.5), (-1.0, 0.0, 0.0)),
+            ((0.5, 1.0, 0.5), (0.0, 1.0, 0.0)), ((0.5, 0.0, 0.5), (0.0, -1.0, 0.0)),
+            ((0.5, 0.5, 1.0), (0.0, 0.0, 1.0)), ((0.5, 0.5, 0.0), (0.0, 0.0, -1.0)))
+
+    @staticmethod
+    def _square(x0, x1, y0, y1, z):
+        return ((x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z))
+
+    def test_inner_square_is_kept_by_identity(self):
+        inner = self._square(0.25, 0.75, 0.25, 0.75, 0.5)
+        out = hs.clip_to_convex([inner], self.CUBE, EPS)
+        self.assertEqual(len(out), 1)
+        self.assertIs(out[0], inner)
+
+    def test_square_crossing_a_face_is_cut(self):
+        crossing = self._square(0.5, 1.5, 0.25, 0.75, 0.5)
+        out = hs.clip_to_convex([crossing], self.CUBE, EPS)
+        self.assertEqual(len(out), 1)
+        lo, hi = _bbox(out[0])
+        self.assertAlmostEqual(lo[0], 0.5)
+        self.assertAlmostEqual(hi[0], 1.0)
+        self.assertAlmostEqual(lo[1], 0.25)
+        self.assertAlmostEqual(hi[1], 0.75)
+
+    def test_outside_square_is_dropped(self):
+        outside = self._square(2.0, 3.0, 0.25, 0.75, 0.5)
+        self.assertEqual(hs.clip_to_convex([outside], self.CUBE, EPS), ())
+
+    def test_mixed_input_keeps_order(self):
+        inner = self._square(0.25, 0.75, 0.25, 0.75, 0.5)
+        outside = self._square(2.0, 3.0, 0.25, 0.75, 0.5)
+        crossing = self._square(0.5, 1.5, 0.25, 0.75, 0.5)
+        out = hs.clip_to_convex([inner, outside, crossing], iter(self.CUBE), EPS)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], inner)
+
+
 if __name__ == "__main__":
     unittest.main()

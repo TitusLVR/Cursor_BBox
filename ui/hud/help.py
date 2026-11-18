@@ -49,7 +49,7 @@ def _clamp01(x: float) -> float:
 class HelpOverlay:
     def __init__(self, operator_name: str):
         self.operator_name = operator_name
-        self.sections: list[HUDSection] = []
+        self._all_sections: list[HUDSection] = []
         self._items_by_key: dict[str, HUDItem] = {}
         self.visible: bool = True
         self.expanded: bool = True
@@ -64,8 +64,13 @@ class HelpOverlay:
         self._last_size: tuple[int, int] = (0, 0)
 
     # --- setup ---
+    @property
+    def sections(self) -> list[HUDSection]:
+        """Sections to show right now (per-mode sections hide themselves)."""
+        return [s for s in self._all_sections if s.is_visible()]
+
     def add_section(self, section: HUDSection) -> None:
-        self.sections.append(section)
+        self._all_sections.append(section)
         for it in section.items:
             self._items_by_key[it.key] = it
 

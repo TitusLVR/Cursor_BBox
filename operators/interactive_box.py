@@ -381,7 +381,7 @@ class CursorBBox_OT_interactive_box(BrushMarkingMixin, bpy.types.Operator):
             HUDItem("Undo / Redo", "Ctrl+Z / Ctrl+Shift+Z"),
             HUDItem("Confirm", "RMB"),
             HUDItem("Cancel", "ESC"),
-        ]))
+        ], visible_getter=lambda: not getattr(self, 'point_mode', False)))
         self.hud_ctl.help.add_section(HUDSection("Point Mode", [
             HUDItem("Add point", "LMB"),
             HUDItem("Snap on/off", "S"),
@@ -391,7 +391,7 @@ class CursorBBox_OT_interactive_box(BrushMarkingMixin, bpy.types.Operator):
             HUDItem("Snap threshold", "Ctrl+Wheel"),
             HUDItem("Toggle limit plane", "C"),
             HUDItem("Exit point mode", "A"),
-        ]))
+        ], visible_getter=lambda: getattr(self, 'point_mode', False)))
         # Live parameter dashboard (HUDOverlay).
         from ..functions.utils import CURSOR_PLANE_ALIGNMENTS as _PLANES
         _mode_names = ("All", "Vert", "Edge", "Face")
